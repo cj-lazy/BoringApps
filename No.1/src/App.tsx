@@ -4,15 +4,17 @@ import { BlockNoteView } from "@blocknote/mantine";
 import "@blocknote/mantine/style.css";
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { writeFile } from "@tauri-apps/plugin-fs"; 
 
 import katex from "katex";
 import "katex/dist/katex.min.css"; 
 import { BlockNoteSchema, defaultBlockSpecs, defaultProps } from "@blocknote/core";
 import { createReactBlockSpec, getDefaultReactSlashMenuItems, SuggestionMenuController } from "@blocknote/react";
 
-// === 🌈 语法高亮 ===
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { asBlob } from "html-docx-js-typescript";
 
 // === 🛠️ 辅助工具 ===
 const filterSuggestionItems = (items: any[], query: string) => {
@@ -22,10 +24,9 @@ const filterSuggestionItems = (items: any[], query: string) => {
   );
 };
 
-
-// 💻 自定义 Code 代码块 (UI 2.0 锁定版)
-
-
+// ==============================================================
+// 💻 自定义 Code 代码块
+// ==============================================================
 const codeBlockSchema = {
   type: "codeBlock" as const,
   propSchema: {
@@ -34,13 +35,29 @@ const codeBlockSchema = {
     language: { default: "cpp" },
   },
   content: "none" as const, 
+  
+  // 🔥🔥🔥 关键修改：导出 Word 时，直接输出 Markdown 格式文本
+  toExternalHTML: (block: any) => {
+    const pre = document.createElement("pre");
+    // 设置一点背景色，但在 Word 里主要看文字
+    pre.style.backgroundColor = "#f0f0f0";
+    pre.style.padding = "8px";
+    pre.style.fontFamily = "Consolas, monospace";
+    pre.style.whiteSpace = "pre-wrap";
+    
+    // 构造 Markdown 格式字符串
+    const codeContent = block.props.text || "";
+    const lang = block.props.language || "text";
+    pre.innerText = `\`\`\`${lang}\n${codeContent}\n\`\`\``;
+    
+    return { dom: pre };
+  }
 };
 
 const CodeBlock = createReactBlockSpec(codeBlockSchema, {
   render: ({ block, editor }) => {
     const [isEditing, setIsEditing] = useState(false);
     
-    // 初始化解码
     const [code, setCode] = useState(() => {
         try { return decodeURIComponent(block.props.text); } 
         catch { return block.props.text; }
@@ -51,7 +68,6 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
     const [isExpanded, setIsExpanded] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // 数据同步
     useEffect(() => {
         try {
             const decoded = decodeURIComponent(block.props.text);
@@ -63,7 +79,6 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [block.props.text, block.props.language]);
 
-    // 自动聚焦
     useEffect(() => {
       if (isEditing && textareaRef.current) {
         textareaRef.current.focus();
@@ -96,28 +111,14 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
         { value: "json", label: "JSON" }, { value: "markdown", label: "Markdown" }
     ];
 
-    // UI 2.0 样式
     const containerBg = "#ffffff";
     const headerBg = "#f5f6f7";    
     const borderColor = "#dee0e3"; 
     const codeFontFamily = 'Menlo, Monaco, "Courier New", monospace';
     const paddingVal = "12px";
 
-    const containerStyle = {
-        height: (isExpanded) ? "auto" : "300px", 
-        minHeight: "100px", 
-    };
-
-    const headerBtnStyle = {
-        background: "transparent", border: "none", cursor: "pointer", 
-        color: "#646a73", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px",
-        padding: "4px 6px", borderRadius: "4px", transition: "background 0.2s"
-    };
-
-    const Divider = () => <span style={{ color: "#dee0e3", margin: "0 6px" }}>|</span>;
-
     return (
-      <div style={{
+      <div className="code-block-container" style={{
           margin: "15px 0", 
           borderRadius: "6px", 
           border: `1px solid ${borderColor}`,
@@ -131,21 +132,22 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
           display: "flex", 
           flexDirection: "column",
           position: "relative",
-          ...containerStyle
+          height: (isExpanded) ? "auto" : "300px", 
+          minHeight: "100px", 
       }} onDoubleClick={(e) => e.stopPropagation()}>
 
-        {/* 顶部栏 */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", height: "34px", backgroundColor: headerBg, borderBottom: `1px solid ${borderColor}`, userSelect: "none", fontSize: "12px", color: "#646a73", flexShrink: 0 }}>
+        {/* 顶部栏：UI 元素，导出时通过 Schema 忽略，打印时通过 CSS 忽略 */}
+        <div className="code-block-header export-exclude no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", height: "34px", backgroundColor: headerBg, borderBottom: `1px solid ${borderColor}`, userSelect: "none", fontSize: "12px", color: "#646a73", flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', cursor: "pointer" }} onClick={toggleExpand}>
              <span style={{ marginRight: '6px', fontSize: "12px", transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}>▼</span>
-             <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块</span>
+             <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块 ({lang})</span>
           </div>
           <div style={{ display: "flex", alignItems: "center" }}>
              <select value={lang} onChange={(e) => { const newLang = e.target.value; setLang(newLang); editor.updateBlock(block, { props: { ...block.props, language: newLang } }); }} onClick={(e) => e.stopPropagation()} style={{ background: "transparent", border: "none", outline: "none", color: "#646a73", cursor: "pointer", fontWeight: 500, fontSize: "12px", fontFamily: "sans-serif", textAlign: "left" }}>
               {languages.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
             </select>
-            <Divider />
-            <button onClick={handleCopy} style={headerBtnStyle}><span>📄</span> <span style={{fontFamily: "sans-serif"}}>{copyStatus}</span></button>
+            <span style={{ color: "#dee0e3", margin: "0 6px" }}>|</span>
+            <button onClick={handleCopy} style={{ background: "transparent", border: "none", cursor: "pointer", color: "#646a73", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px", padding: "4px 6px", borderRadius: "4px", transition: "background 0.2s" }}><span>📄</span> <span style={{fontFamily: "sans-serif"}}>{copyStatus}</span></button>
           </div>
         </div>
 
@@ -162,22 +164,14 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
             />
           ) : (
             <div onClick={() => setIsEditing(true)} style={{ flex: 1, height: "100%", width: "100%", backgroundColor: "#ffffff", cursor: "text", overflow: "auto" }}>
-              <SyntaxHighlighter 
-                language={block.props.language} 
-                style={vs} 
-                PreTag="div"
-                customStyle={{ margin: 0, padding: paddingVal, backgroundColor: "transparent", fontFamily: codeFontFamily, fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} 
-                codeTagProps={{ style: { fontFamily: codeFontFamily, backgroundColor: "transparent" } }} 
-                showLineNumbers={true} 
-                lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}
-              >
+              <SyntaxHighlighter language={block.props.language} style={vs} PreTag="div" customStyle={{ margin: 0, padding: paddingVal, backgroundColor: "transparent", fontFamily: codeFontFamily, fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} codeTagProps={{ style: { fontFamily: codeFontFamily, backgroundColor: "transparent" } }} showLineNumbers={true} lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}>
                 {code || " "} 
               </SyntaxHighlighter>
-              {!code && <div style={{position:"absolute", top: 12, left: 60, color: "#ccc", pointerEvents:"none", fontFamily:"sans-serif", fontSize:"13px"}}>点击输入代码...</div>}
+              {!code && <div className="export-exclude no-print" style={{position:"absolute", top: 12, left: 60, color: "#ccc", pointerEvents:"none", fontFamily:"sans-serif", fontSize:"13px"}}>点击输入代码...</div>}
             </div>
           )}
           {!isExpanded && !isEditing && (
-              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "60px", background: "linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,1))", pointerEvents: "none", display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "10px" }}>
+              <div className="export-exclude no-print" style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "60px", background: "linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,1))", pointerEvents: "none", display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "10px" }}>
                   <div onClick={toggleExpand} style={{pointerEvents:"auto", cursor:"pointer", color:"#3370ff", fontSize:"12px", background:"white", padding:"2px 10px", borderRadius:"12px", border:"1px solid #dee0e3", boxShadow:"0 2px 4px rgba(0,0,0,0.05)"}}>展开更多 ▼</div>
               </div>
           )}
@@ -187,8 +181,87 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
   }
 });
 
-// === 📐 LaTeX ===
-const latexBlockSchema = { type: "latex" as const, propSchema: { ...defaultProps, text: { default: "" } }, content: "none" as const };
+// ==============================================================
+// 📂 自定义文件块
+// ==============================================================
+const fileBlockSchema = {
+  type: "file" as const,
+  propSchema: {
+    ...defaultProps,
+    name: { default: "Unknown File" },
+    url: { default: "" },
+  },
+  content: "none" as const,
+
+  // 🔥🔥🔥 关键修改：只导出纯文本链接
+  toExternalHTML: (block: any) => {
+    const div = document.createElement("div");
+    const link = document.createElement("a");
+    // Word 里通常展示为纯文本链接
+    link.href = block.props.url; 
+    link.innerText = `[附件: ${block.props.name}]`;
+    link.style.color = "#1890ff";
+    div.appendChild(link);
+    return { dom: div };
+  }
+};
+
+const FileBlock = createReactBlockSpec(fileBlockSchema, {
+  render: ({ block }) => {
+    const { name, url } = block.props;
+
+    const handleDbClick = async (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        await invoke("open_file", { url: url }); 
+      } catch (err) {
+        alert("无法打开文件: " + err);
+      }
+    };
+
+    return (
+      <div
+        className={"bn-file-block-content"}
+        onDoubleClick={handleDbClick}
+        style={{
+          display: "flex", alignItems: "center", padding: "10px", margin: "5px 0", border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white", cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%", boxShadow: "0 1px 2px rgba(0,0,0,0.05)"
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f7f9fb"}
+        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "white"}
+        title="双击打开文件"
+      >
+        <div style={{ fontSize: "24px", marginRight: "12px" }}>📄</div>
+        <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <span style={{ fontSize: "14px", fontWeight: 500, color: "#333", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {name || "未知文件"}
+            </span>
+            <span className="export-exclude no-print" style={{ fontSize: "11px", color: "#999" }}>
+                双击调用系统程序打开
+            </span>
+        </div>
+      </div>
+    );
+  },
+});
+
+// ==============================================================
+// 📐 LaTeX 块
+// ==============================================================
+const latexBlockSchema = { 
+    type: "latex" as const, 
+    propSchema: { ...defaultProps, text: { default: "" } }, 
+    content: "none" as const,
+    
+    // 🔥🔥🔥 关键修改：直接导出 $$ 公式 $$ 文本
+    toExternalHTML: (block: any) => {
+        const div = document.createElement("p");
+        div.innerText = `$$\n${block.props.text}\n$$`;
+        div.style.fontFamily = "Consolas, monospace";
+        return { dom: div };
+    }
+};
+
 const LatexBlock = createReactBlockSpec(latexBlockSchema, {
     render: ({ block, editor }) => {
       const divRef = useRef<HTMLDivElement>(null);
@@ -211,13 +284,22 @@ const LatexBlock = createReactBlockSpec(latexBlockSchema, {
           } 
       }, [inputValue, isEditing]);
       const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(inputValue) } }); setIsEditing(false); };
-      return ( <div style={{ padding: "10px", margin: "5px 0", userSelect: "none" }}> {isEditing ? ( <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}> <textarea ref={textAreaRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === "Escape") { setIsEditing(false); setInputValue(block.props.text); } }} onBlur={handleSave} placeholder="输入 LaTeX 公式..." style={{ width: "100%", minHeight: "80px", padding: "10px", fontFamily: "Consolas, Monaco, monospace", fontSize: "14px", borderRadius: "6px", border: "2px solid #1890ff", outline: "none", resize: "vertical", backgroundColor: "#f9f9f9" }} /> <div style={{fontSize: "12px", color: "#888"}}>按 Enter 保存</div> </div> ) : ( <div ref={divRef} onClick={() => setIsEditing(true)} style={{ minHeight: "40px", cursor: "pointer", padding: "10px", borderRadius: "6px", textAlign: "center" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(0,0,0,0.03)"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"} title="点击编辑公式" /> )} </div> );
+      return ( <div style={{ padding: "10px", margin: "5px 0", userSelect: "none" }}> {isEditing ? ( <div className="export-exclude no-print" style={{ display: "flex", flexDirection: "column", gap: "5px" }}> <textarea ref={textAreaRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === "Escape") { setIsEditing(false); setInputValue(block.props.text); } }} onBlur={handleSave} placeholder="输入 LaTeX 公式..." style={{ width: "100%", minHeight: "80px", padding: "10px", fontFamily: "Consolas, Monaco, monospace", fontSize: "14px", borderRadius: "6px", border: "2px solid #1890ff", outline: "none", resize: "vertical", backgroundColor: "#f9f9f9" }} /> <div style={{fontSize: "12px", color: "#888"}}>按 Enter 保存</div> </div> ) : ( <div ref={divRef} onClick={() => setIsEditing(true)} style={{ minHeight: "40px", cursor: "pointer", padding: "10px", borderRadius: "6px", textAlign: "center" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(0,0,0,0.03)"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"} title="点击编辑公式" /> )} </div> );
     },
 });
 
-const schema = BlockNoteSchema.create({ blockSpecs: { ...defaultBlockSpecs, latex: LatexBlock(), codeBlock: CodeBlock() } });
+const schema = BlockNoteSchema.create({ 
+    blockSpecs: { 
+        ...defaultBlockSpecs, 
+        latex: LatexBlock(), 
+        codeBlock: CodeBlock(),
+        file: FileBlock() 
+    } 
+});
 
 // === 🎨 弹窗组件 ===
+// (代码保持不变，为了节省字符，此处省略 CustomDialog 定义，请保留之前的 CustomDialog 代码)
+// 如果你复制时需要完整的，我可以再贴一次，但这里逻辑没变。
 interface FileNode { name: string; path: string; is_dir: boolean; children: FileNode[]; }
 interface TrashItem { name: string; is_dir: boolean; path: string; }
 interface DialogProps { isOpen: boolean; type: 'confirm' | 'prompt' | 'tree-select' | 'settings' | 'alert' | 'save-guard' | 'trash'; title: string; message?: string; defaultValue?: string; treeData?: FileNode[]; disabledPath?: string; trashItems?: TrashItem[]; bgImage?: string | null; bgOpacity?: number; bgBlur?: number; onSetBgImage?: (file: File) => void; onSetBgOpacity?: (val: number) => void; onSetBgBlur?: (val: number) => void; onClearBg?: () => void; onEmptyTrash?: () => void; onRestore?: (name: string) => void; onDeleteForever?: (name: string) => void; onConfirm: (value: any) => void; onCancel: () => void; }
@@ -243,6 +325,7 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isResizing, setIsResizing] = useState(false);
   const [status, setStatus] = useState("就绪");
+  const [lastSaveTime, setLastSaveTime] = useState<string>("");
   
   const isDirtyRef = useRef(false);
   const isLoadingRef = useRef(false);
@@ -310,10 +393,12 @@ function App() {
   const refreshTree = async () => { try { const tree = await invoke<FileNode[]>("get_file_tree"); setFileTree(tree); } catch (e) { console.error(e); } };
 
   const toggleFolder = (path: string) => { const newSet = new Set(expandedFolders); if (newSet.has(path)) newSet.delete(path); else newSet.add(path); setExpandedFolders(newSet); };
+  
   const handleSelect = (node: FileNode) => { 
     if (node.is_dir) { toggleFolder(node.path); setSelectedFolder(node.path); } 
     else { loadNote(node.path); const parentPath = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : null; setSelectedFolder(parentPath); } 
   };
+  
   const handleBackgroundClick = (e: React.MouseEvent) => { if (e.target === e.currentTarget) setSelectedFolder(null); };
 
   const saveCurrentNote = async () => {
@@ -337,12 +422,13 @@ function App() {
         } 
         else if (block.type === "codeBlock") {
             if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
-            
-            // 🔥 保存修复：解码回纯文本，确保 Markdown 可读
             let textToSave = "";
             try { textToSave = decodeURIComponent(block.props.text); } catch { textToSave = block.props.text; }
-            
             finalMarkdown += `\n\`\`\`${block.props.language}\n${textToSave}\n\`\`\`\n`;
+        }
+        else if (block.type === "file") {
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            finalMarkdown += `\n[FILE:${block.props.name}](${block.props.url})\n`;
         }
         else { standardBlockBuffer.push(block); }
       }
@@ -350,60 +436,58 @@ function App() {
 
       await invoke("save_note", { path: fileToSave, content: finalMarkdown });
       setInitialAssetUrls(currentAssetUrls);
-      isDirtyRef.current = false; setStatus("已保存");
+      isDirtyRef.current = false; 
+      setStatus("已保存");
+      
+      const now = new Date();
+      setLastSaveTime(`${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`);
     } catch(e) { setStatus("保存失败"); console.error(e); }
   };
 
-  // 🔥 核心逻辑：使用 @@CODE_BLOCK_ID_0@@ 这种无格式文本占位符，避免被 Markdown Parser 解析成加粗
   const loadNote = async (path: string) => { 
     if (isDirtyRef.current) { await saveCurrentNote(); }
     setStatus(`加载 ${path}...`); isLoadingRef.current = true; 
+    
+    const now = new Date();
+    setLastSaveTime(`${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`);
+
     try { 
       let content = await invoke<string>("load_note", { path }); 
       
       const codeBlockMap = new Map();
       let blockIdCounter = 0;
 
-      // 1. 替换代码块为无格式 Token: @@CODE_BLOCK_ID_0@@
-      // 这里的正则要足够强壮，匹配各种换行情况
       content = content.replace(/```(\S*)\s*\n([\s\S]*?)```/g, (_match, lang, code) => {
           const id = `@@CODE_BLOCK_ID_${blockIdCounter++}@@`;
           codeBlockMap.set(id, { kind: "code", lang: lang || "text", code: code.trim() });
           return id; 
       });
 
-      // 2. 替换公式
       content = content.replace(/\$\$\n([\s\S]*?)\n\$\$/g, (_match, formula) => {
           const id = `@@LATEX_ID_${blockIdCounter++}@@`;
           codeBlockMap.set(id, { kind: "latex", code: formula.trim() });
           return id;
       });
 
-      // 3. 解析 (此时 ID 不会被 Markdown 解析器弄脏，因为没有 __ 或 **)
+      content = content.replace(/\[FILE:(.*?)\]\((.*?)\)/g, (_match, name, url) => {
+        const id = `@@FILE_ID_${blockIdCounter++}@@`;
+        codeBlockMap.set(id, { kind: "file", name: name, url: url });
+        return id;
+      });
+
       const rawBlocks = await editor.tryParseMarkdownToBlocks(content); 
       
-      // 4. 遍历还原
       const processedBlocks = rawBlocks.map((block: any) => {
-          // 检查 paragraph 是否就是那个 Token
           if (block.type === "paragraph" && block.content && block.content.length === 1 && block.content[0].text) {
               const text = block.content[0].text.trim();
               if (codeBlockMap.has(text)) {
                   const data = codeBlockMap.get(text);
                   if (data.kind === "latex") {
-                      return {
-                          type: "latex",
-                          props: { text: encodeURIComponent(data.code) },
-                          content: []
-                  };
-                  } else {
-                      return {
-                          type: "codeBlock",
-                          props: {
-                              text: encodeURIComponent(data.code),
-                              language: data.lang
-                          },
-                          content: []
-                      };
+                      return { type: "latex", props: { text: encodeURIComponent(data.code) }, content: [] };
+                  } else if (data.kind === "code") {
+                      return { type: "codeBlock", props: { text: encodeURIComponent(data.code), language: data.lang }, content: [] };
+                  } else if (data.kind === "file") {
+                      return { type: "file", props: { name: data.name, url: data.url }, content: [] };
                   }
               }
           }
@@ -477,20 +561,114 @@ function App() {
     });
   };
 
+  // 🔥 导出 PDF：调用浏览器原生打印
+  const handleExportPdf = () => {
+    window.print();
+  };
+
+  // 🔥🔥🔥 导出 Word：DOM 清洗逻辑 (手动移除 export-exclude)
+  const handleExportWord = async () => {
+    if (!currentFile) return;
+    try {
+      // 1. 获取 raw HTML
+      const rawHtml = await editor.blocksToHTMLLossy(editor.document);
+      
+      // 2. 使用 DOMParser 解析
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(rawHtml, "text/html");
+
+      // 3. 移除所有不想要的元素
+      doc.querySelectorAll('.export-exclude, .bn-block-drag-handle, .bn-side-menu').forEach(el => el.remove());
+
+      // 4. 获取清洗后的 HTML
+      const cleanedHtml = doc.body.innerHTML;
+
+      // 5. 包装
+      const fullHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <style>
+            body { font-family: 'Arial', sans-serif; line-height: 1.6; }
+            img { max-width: 100%; }
+            pre { background: #f5f5f5; padding: 10px; border-radius: 6px; white-space: pre-wrap; font-family: monospace; }
+            code { font-family: monospace; }
+          </style>
+        </head>
+        <body>
+          <h1 style="border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 20px;">
+            ${currentFile.split("/").pop()}
+          </h1>
+          ${cleanedHtml}
+        </body>
+        </html>
+      `;
+
+      // 6. 保存
+      const blob = await asBlob(fullHtml);
+      const arrayBuffer = await blob.arrayBuffer();
+      const uint8Array = new Uint8Array(arrayBuffer);
+
+      const path = await save({
+        defaultPath: `${currentFile.split("/").pop()}.docx`,
+        filters: [{ name: 'Word Document', extensions: ['docx'] }]
+      });
+
+      if (path) {
+        await writeFile(path, uint8Array);
+        alert("导出 Word 成功！");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("导出 Word 失败: " + e);
+    }
+  };
+
   return (
     <div style={{ height: "100vh", display: "flex", position: "relative" }}>
-      {/* 🔥 全局样式: UI 2.0 风格  */}
+      {/* 🔥 全局样式 & 打印专用样式 (修复截图问题) */}
       <style>{`
         button[aria-label*="Download"], button[title*="Download"], [class*="bn-file-block"] [role="button"]:has(svg path[d*="M13 10"]), [class*="bn-image-block"] [role="button"]:has(svg path[d*="M13 10"]), [class*="bn-video-block"] [role="button"]:has(svg path[d*="M13 10"]) { display: none !important; }
         .bn-block-content .bn-block-content { background: transparent !important; padding: 0 !important; }
         [data-content-type="codeBlock"] { background: transparent !important; box-shadow: none !important; }
         pre, code, [class*="language-"] { background: transparent !important; background-color: transparent !important; text-shadow: none !important; }
         .bn-block-content { max-width: 100% !important; }
+
+        /* 🖨️ PDF 导出关键修复：打破高度限制 */
+        @media print {
+          /* 隐藏 UI */
+          .no-print, .bn-side-menu, .bn-formatting-toolbar, button, .export-exclude { display: none !important; }
+          
+          /* 🔥 强制所有容器高度自适应，允许分页 */
+          html, body, #root, div[style*="height: 100vh"] {
+            height: auto !important;
+            overflow: visible !important;
+            display: block !important;
+          }
+          
+          /* 针对内容区域 */
+          .print-content { 
+            position: static !important; 
+            width: 100% !important; 
+            height: auto !important; 
+            overflow: visible !important; 
+            background: white !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            display: block !important;
+          }
+          
+          .bn-block-content[data-placeholder]::before { display: none !important; }
+          body { background: white !important; }
+        }
       `}</style>
-      <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 0, backgroundImage: bgImage ? `url(${convertFileSrc(bgImage)})` : "none", backgroundSize: "cover", backgroundPosition: "center", backgroundColor: "#fff" }} />
+      
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 0, backgroundImage: bgImage ? `url(${convertFileSrc(bgImage)})` : "none", backgroundSize: "cover", backgroundPosition: "center", backgroundColor: "#fff" }} className="no-print" />
       <CustomDialog {...dialogState} onConfirm={(val) => dialogState.resolve(val)} onCancel={() => dialogState.resolve(null)} bgImage={bgImage} bgOpacity={bgOpacity} bgBlur={bgBlur} onClearBg={clearBg} onSetBgImage={updateBgImage} onSetBgOpacity={(v) => { setBgOpacity(v); localStorage.setItem("app_bg_opacity", v.toString()); }} onSetBgBlur={(v) => { setBgBlur(v); localStorage.setItem("app_bg_blur", v.toString()); }} />
       
-      <div onClick={handleBackgroundClick} style={{ width: isSidebarOpen ? sidebarWidth : 0, borderRight: isSidebarOpen ? "1px solid rgba(0,0,0,0.1)" : "none", background: `rgba(249, 249, 249, ${Math.max(0.6, bgOpacity - 0.1)})`, backdropFilter: `blur(${bgBlur}px)`, display: "flex", flexDirection: "column", overflow: "hidden", transition: isResizing ? "none" : "width 0.2s", zIndex: 1 }}>
+      {/* 侧边栏 */}
+      <div className="no-print" onClick={handleBackgroundClick} style={{ width: isSidebarOpen ? sidebarWidth : 0, borderRight: isSidebarOpen ? "1px solid rgba(0,0,0,0.1)" : "none", background: `rgba(249, 249, 249, ${Math.max(0.6, bgOpacity - 0.1)})`, backdropFilter: `blur(${bgBlur}px)`, display: "flex", flexDirection: "column", overflow: "hidden", transition: isResizing ? "none" : "width 0.2s", zIndex: 1 }}>
         <div style={{ padding: "15px", fontWeight: "bold", borderBottom: "1px solid rgba(0,0,0,0.05)", whiteSpace:"nowrap", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
           <span>🗂️ 无聊的产品线No.1</span>
           <button onClick={handleOpenSettings} title="设置" style={{ background:"transparent", border:"none", cursor:"pointer", fontSize:"16px", opacity: 0.6 }}>⚙️</button>
@@ -506,13 +684,30 @@ function App() {
         </div>
       </div>
 
-      {isSidebarOpen && <div onMouseDown={startResizing} style={{ width: "4px", cursor: "col-resize", background: "transparent", zIndex: 10, marginLeft: "-2px" }} />}
+      {isSidebarOpen && <div className="no-print" onMouseDown={startResizing} style={{ width: "4px", cursor: "col-resize", background: "transparent", zIndex: 10, marginLeft: "-2px" }} />}
       
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", zIndex: 1, position: "relative" }}>
-        <div style={{ padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.05)", display: "flex", justifyContent: "space-between", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
-          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={{ border: "none", background: "transparent", cursor: "pointer" }}>{isSidebarOpen ? "◀" : "▶"}</button>
+      {/* 主内容区域 */}
+      <div className="print-content" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", zIndex: 1, position: "relative" }}>
+        
+        {/* 顶部栏 */}
+        <div className="no-print" style={{ padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
+          <div style={{display: 'flex', alignItems: 'center'}}>
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={{ border: "none", background: "transparent", cursor: "pointer" }}>{isSidebarOpen ? "◀" : "▶"}</button>
+            {currentFile && (
+                <span style={{ marginLeft: "20px", fontSize: "12px", color: "#999", transition: "opacity 0.3s" }}>
+                    {lastSaveTime ? `上次保存: ${lastSaveTime}` : ""}
+                </span>
+            )}
+          </div>
+          
           <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
             <span style={{ fontSize: "12px", color: status === "● 未保存" ? "#faad14" : "#888", fontWeight: status === "● 未保存" ? "bold" : "normal" }}>{status}</span>
+            {currentFile && (
+              <div style={{ display: 'flex', gap: '5px', marginRight: '10px' }}>
+                <button onClick={handleExportWord} title="导出为 Word" style={{ padding: "4px 8px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px" }}><span>📝</span> Word</button>
+                <button onClick={handleExportPdf} title="导出为 PDF" style={{ padding: "4px 8px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px" }}><span>🖨️</span> PDF</button>
+              </div>
+            )}
             <button onClick={saveCurrentNote} title="保存 (Ctrl+S)" style={{ padding: "4px 10px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center" }}>💾 保存</button>
           </div>
         </div>

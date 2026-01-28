@@ -1,7 +1,7 @@
 {
   "name": "boringapps_no.1",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "scripts": {
     "version-sync": "node sync-version.cjs",
@@ -15,7 +15,10 @@
     "@blocknote/mantine": "^0.46.1",
     "@blocknote/react": "^0.46.1",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
     "@tauri-apps/plugin-opener": "^2",
+    "html-docx-js-typescript": "^0.1.5",
     "katex": "^0.16.28",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
