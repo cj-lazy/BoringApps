@@ -1,7 +1,7 @@
 {
   "name": "boringapps_no.1",
   "private": true,
-  "version": "1.2.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "version-sync": "node sync-version.cjs",
@@ -16,13 +16,17 @@
     "@blocknote/react": "^0.46.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "katex": "^0.16.28",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-syntax-highlighter": "^16.1.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/katex": "^0.16.8",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
