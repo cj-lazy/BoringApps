@@ -16,6 +16,12 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { asBlob } from "html-docx-js-typescript";
 
+// 🔥🔥🔥 引入 Mermaid 绘图库
+import mermaid from "mermaid";
+
+// 初始化 Mermaid 配置
+mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+
 // === 🛠️ 辅助工具 ===
 const filterSuggestionItems = (items: any[], query: string) => {
   return items.filter((item) => 
@@ -24,8 +30,197 @@ const filterSuggestionItems = (items: any[], query: string) => {
   );
 };
 
+// 排序工具函数 (已优化：修复原地排序导致的状态突变问题)
+const sortFileTree = (nodes: FileNode[]): FileNode[] => {
+    // 🔥 关键修改：使用 [...nodes] 创建副本，避免直接修改 React State
+    return [...nodes].sort((a, b) => {
+        if (a.is_dir && !b.is_dir) return -1;
+        if (!a.is_dir && b.is_dir) return 1;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    }).map(node => {
+        if (node.children && node.children.length > 0) {
+            return { ...node, children: sortFileTree(node.children) };
+        }
+        return node;
+    });
+};
+
 // ==============================================================
-// 💻 自定义 Code 代码块
+// 🧜‍♂️ Mermaid (流程图/思维导图) 块 - [已优化支持拖动调整大小]
+// ==============================================================
+const mermaidBlockSchema = {
+  type: "mermaid" as const,
+  propSchema: {
+    ...defaultProps,
+    code: { default: "graph TD;\nA-->B;" }, // 默认代码
+    width: { default: 500 }, // 默认宽度
+    height: { default: 300 }, // 默认高度
+  },
+  content: "none" as const,
+  
+  // 导出逻辑
+  toExternalHTML: (block: any) => {
+    const div = document.createElement("div");
+    div.className = "mermaid-export-data";
+    div.dataset.code = block.props.code;
+    div.innerText = `[流程图/思维导图]`;
+    // 导出时尝试保持一定的样式提示
+    div.style.width = block.props.width + "px";
+    div.style.height = block.props.height + "px";
+    return { dom: div };
+  }
+};
+
+const MermaidBlock = createReactBlockSpec(mermaidBlockSchema, {
+  render: ({ block, editor }) => {
+    const [isEditing, setIsEditing] = useState(false);
+    const [code, setCode] = useState(block.props.code);
+    
+    // 本地状态用于拖动时的实时渲染，避免频繁触发 block update
+    const [size, setSize] = useState({ width: block.props.width, height: block.props.height });
+    
+    const containerRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
+
+    // 当外部 props 变化（如撤销/重做）时，同步 state
+    useEffect(() => {
+        setSize({ width: block.props.width, height: block.props.height });
+    }, [block.props.width, block.props.height]);
+
+    // 渲染图表
+    useEffect(() => {
+        if (containerRef.current && !isEditing) {
+            containerRef.current.innerHTML = "";
+            const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
+            mermaid.render(id, code).then(({ svg }) => {
+                if (containerRef.current) containerRef.current.innerHTML = svg;
+            }).catch((_e) => {
+                if (containerRef.current) containerRef.current.innerHTML = `<div style="color:red; font-size:12px; padding:10px;">语法错误</div>`;
+            });
+        }
+    }, [code, isEditing]);
+
+    const handleSaveCode = () => {
+        editor.updateBlock(block, { props: { ...block.props, code: code } });
+        setIsEditing(false);
+    };
+
+    // === 🖐️ 拖动调整大小逻辑 ===
+    const handleResizeStart = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startWidth = size.width;
+        const startHeight = size.height;
+
+        const onMouseMove = (moveEvent: MouseEvent) => {
+            const newWidth = Math.max(200, startWidth + (moveEvent.clientX - startX)); // 最小宽度 200
+            const newHeight = Math.max(100, startHeight + (moveEvent.clientY - startY)); // 最小高度 100
+            setSize({ width: newWidth, height: newHeight });
+        };
+
+        const onMouseUp = (upEvent: MouseEvent) => {
+            const finalWidth = Math.max(200, startWidth + (upEvent.clientX - startX));
+            const finalHeight = Math.max(100, startHeight + (upEvent.clientY - startY));
+            
+            // 拖动结束后，一次性更新 Block 属性
+            editor.updateBlock(block, { props: { ...block.props, width: finalWidth, height: finalHeight } });
+            
+            window.removeEventListener("mousemove", onMouseMove);
+            window.removeEventListener("mouseup", onMouseUp);
+        };
+
+        window.addEventListener("mousemove", onMouseMove);
+        window.addEventListener("mouseup", onMouseUp);
+    };
+
+    return (
+        <div 
+            className="mermaid-block-wrapper"
+            style={{ 
+                margin: "10px 0", 
+                border: "1px solid #dee0e3", 
+                borderRadius: "8px", 
+                backgroundColor: "white",
+                width: isEditing ? "100%" : `${size.width}px`, // 编辑模式下全宽，预览模式下使用自定义宽度
+                transition: isEditing ? "width 0.2s" : "none", // 拖动时不需要过渡动画
+                position: "relative",
+                maxWidth: "100%", // 防止溢出页面
+                boxShadow: "0 1px 2px rgba(0,0,0,0.05)"
+            }}
+        >
+            {/* 顶部栏 */}
+            <div className="export-exclude no-print" style={{ background: "#f5f6f7", padding: "5px 10px", display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#666", borderBottom: "1px solid #eee", borderTopLeftRadius: "8px", borderTopRightRadius: "8px" }}>
+                <span style={{fontWeight: "bold", display:"flex", alignItems:"center", gap:"5px"}}>🧜‍♂️ 流程图 / 思维导图</span>
+                <button onClick={() => setIsEditing(!isEditing)} style={{ cursor: "pointer", border: "none", background: "transparent", color: "#1890ff" }}>
+                    {isEditing ? "收起预览" : "编辑代码"}
+                </button>
+            </div>
+            
+            {/* 内容区 */}
+            {isEditing ? (
+                // 编辑模式
+                <textarea 
+                    ref={inputRef}
+                    value={code} 
+                    onChange={(e) => setCode(e.target.value)}
+                    onBlur={handleSaveCode}
+                    placeholder="在此输入 Mermaid 语法..."
+                    style={{ width: "100%", height: "200px", padding: "10px", border: "none", fontFamily: "monospace", fontSize: "13px", resize: "vertical", outline: "none", background: "#fafafa", borderBottomLeftRadius: "8px", borderBottomRightRadius: "8px" }}
+                />
+            ) : (
+                // 预览模式
+                <div 
+                    ref={containerRef} 
+                    style={{ 
+                        padding: "10px", 
+                        background: "white", 
+                        height: `${size.height}px`, // 应用高度
+                        width: "100%",
+                        overflow: "auto", // 内容过多时出现滚动条
+                        display: "flex", 
+                        justifyContent: "center", 
+                        alignItems: "center",
+                        cursor: "default"
+                    }}
+                    onDoubleClick={() => setIsEditing(true)}
+                />
+            )}
+
+            {/* ↘️ 调整大小手柄 (仅在预览模式显示) */}
+            {!isEditing && (
+                <div 
+                    onMouseDown={handleResizeStart}
+                    className="export-exclude no-print"
+                    title="拖动调整大小"
+                    style={{
+                        position: "absolute",
+                        bottom: "2px",
+                        right: "2px",
+                        width: "16px",
+                        height: "16px",
+                        cursor: "nwse-resize",
+                        zIndex: 10,
+                        display: "flex",
+                        alignItems: "flex-end",
+                        justifyContent: "flex-end",
+                    }}
+                >
+                    {/* 手柄图标样式 */}
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M10 2L2 10H10V2Z" fill="#ccc"/>
+                    </svg>
+                </div>
+            )}
+        </div>
+    );
+  }
+});
+
+// ==============================================================
+// 💻 Code 代码块 (保持不变)
 // ==============================================================
 const codeBlockSchema = {
   type: "codeBlock" as const,
@@ -35,21 +230,15 @@ const codeBlockSchema = {
     language: { default: "cpp" },
   },
   content: "none" as const, 
-  
-  // 🔥🔥🔥 关键修改：导出 Word 时，直接输出 Markdown 格式文本
   toExternalHTML: (block: any) => {
     const pre = document.createElement("pre");
-    // 设置一点背景色，但在 Word 里主要看文字
     pre.style.backgroundColor = "#f0f0f0";
     pre.style.padding = "8px";
     pre.style.fontFamily = "Consolas, monospace";
     pre.style.whiteSpace = "pre-wrap";
-    
-    // 构造 Markdown 格式字符串
     const codeContent = block.props.text || "";
     const lang = block.props.language || "text";
     pre.innerText = `\`\`\`${lang}\n${codeContent}\n\`\`\``;
-    
     return { dom: pre };
   }
 };
@@ -57,87 +246,24 @@ const codeBlockSchema = {
 const CodeBlock = createReactBlockSpec(codeBlockSchema, {
   render: ({ block, editor }) => {
     const [isEditing, setIsEditing] = useState(false);
-    
-    const [code, setCode] = useState(() => {
-        try { return decodeURIComponent(block.props.text); } 
-        catch { return block.props.text; }
-    });
-    
+    const [code, setCode] = useState(() => { try { return decodeURIComponent(block.props.text); } catch { return block.props.text; } });
     const [lang, setLang] = useState(block.props.language);
     const [copyStatus, setCopyStatus] = useState("复制");
     const [isExpanded, setIsExpanded] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    useEffect(() => {
-        try {
-            const decoded = decodeURIComponent(block.props.text);
-            if (decoded !== code) setCode(decoded);
-        } catch {
-            if (block.props.text !== code) setCode(block.props.text);
-        }
-        if (block.props.language !== lang) setLang(block.props.language);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [block.props.text, block.props.language]);
+    useEffect(() => { try { const decoded = decodeURIComponent(block.props.text); if (decoded !== code) setCode(decoded); } catch { if (block.props.text !== code) setCode(block.props.text); } if (block.props.language !== lang) setLang(block.props.language); }, [block.props.text, block.props.language]);
+    useEffect(() => { if (isEditing && textareaRef.current) { textareaRef.current.focus(); } }, [isEditing]);
 
-    useEffect(() => {
-      if (isEditing && textareaRef.current) {
-        textareaRef.current.focus();
-      }
-    }, [isEditing]);
+    const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(code), language: lang } }); setIsEditing(false); };
+    const handleCopy = (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(code); setCopyStatus("已复制"); setTimeout(() => setCopyStatus("复制"), 2000); };
+    const toggleExpand = (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); setIsExpanded(!isExpanded); };
 
-    const handleSave = () => {
-      editor.updateBlock(block, { 
-          props: { ...block.props, text: encodeURIComponent(code), language: lang } 
-      });
-      setIsEditing(false);
-    };
-
-    const handleCopy = (e: React.MouseEvent) => {
-      e.preventDefault(); e.stopPropagation();
-      navigator.clipboard.writeText(code);
-      setCopyStatus("已复制");
-      setTimeout(() => setCopyStatus("复制"), 2000);
-    };
-
-    const toggleExpand = (e: React.MouseEvent) => {
-        e.preventDefault(); e.stopPropagation();
-        setIsExpanded(!isExpanded);
-    };
-
-    const languages = [
-        { value: "cpp", label: "C++" }, { value: "javascript", label: "JavaScript" }, { value: "typescript", label: "TypeScript" },
-        { value: "python", label: "Python" }, { value: "java", label: "Java" }, { value: "go", label: "Go" }, { value: "rust", label: "Rust" },
-        { value: "html", label: "HTML" }, { value: "css", label: "CSS" }, { value: "sql", label: "SQL" }, { value: "bash", label: "Bash" },
-        { value: "json", label: "JSON" }, { value: "markdown", label: "Markdown" }
-    ];
-
-    const containerBg = "#ffffff";
-    const headerBg = "#f5f6f7";    
-    const borderColor = "#dee0e3"; 
-    const codeFontFamily = 'Menlo, Monaco, "Courier New", monospace';
-    const paddingVal = "12px";
+    const languages = [ { value: "cpp", label: "C++" }, { value: "javascript", label: "JavaScript" }, { value: "typescript", label: "TypeScript" }, { value: "python", label: "Python" }, { value: "java", label: "Java" }, { value: "go", label: "Go" }, { value: "rust", label: "Rust" }, { value: "html", label: "HTML" }, { value: "css", label: "CSS" }, { value: "sql", label: "SQL" }, { value: "bash", label: "Bash" }, { value: "json", label: "JSON" }, { value: "markdown", label: "Markdown" }, { value: "mermaid", label: "Mermaid" } ];
 
     return (
-      <div className="code-block-container" style={{
-          margin: "15px 0", 
-          borderRadius: "6px", 
-          border: `1px solid ${borderColor}`,
-          backgroundColor: containerBg, 
-          boxShadow: "0 2px 6px rgba(0,0,0,0.03)",
-          fontFamily: codeFontFamily,
-          resize: "both",  
-          overflow: "hidden", 
-          width: "100%", 
-          maxWidth: "100%",
-          display: "flex", 
-          flexDirection: "column",
-          position: "relative",
-          height: (isExpanded) ? "auto" : "300px", 
-          minHeight: "100px", 
-      }} onDoubleClick={(e) => e.stopPropagation()}>
-
-        {/* 顶部栏：UI 元素，导出时通过 Schema 忽略，打印时通过 CSS 忽略 */}
-        <div className="code-block-header export-exclude no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", height: "34px", backgroundColor: headerBg, borderBottom: `1px solid ${borderColor}`, userSelect: "none", fontSize: "12px", color: "#646a73", flexShrink: 0 }}>
+      <div className="code-block-container" style={{ margin: "15px 0", borderRadius: "6px", border: `1px solid #dee0e3`, backgroundColor: "#ffffff", boxShadow: "0 2px 6px rgba(0,0,0,0.03)", fontFamily: 'Menlo, Monaco, "Courier New", monospace', resize: "both", overflow: "hidden", width: "100%", maxWidth: "100%", display: "flex", flexDirection: "column", position: "relative", height: (isExpanded) ? "auto" : "300px", minHeight: "100px", }} onDoubleClick={(e) => e.stopPropagation()}>
+        <div className="code-block-header export-exclude no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", height: "34px", backgroundColor: "#f5f6f7", borderBottom: `1px solid #dee0e3`, userSelect: "none", fontSize: "12px", color: "#646a73", flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', cursor: "pointer" }} onClick={toggleExpand}>
              <span style={{ marginRight: '6px', fontSize: "12px", transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}>▼</span>
              <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块 ({lang})</span>
@@ -150,31 +276,18 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
             <button onClick={handleCopy} style={{ background: "transparent", border: "none", cursor: "pointer", color: "#646a73", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px", padding: "4px 6px", borderRadius: "4px", transition: "background 0.2s" }}><span>📄</span> <span style={{fontFamily: "sans-serif"}}>{copyStatus}</span></button>
           </div>
         </div>
-
-        {/* 内容区域 */}
         <div style={{ position: "relative", flex: 1, backgroundColor: "#ffffff", cursor: isEditing ? "text" : "default", overflow: "hidden", display: "flex", flexDirection: "column" }}>
           {isEditing ? (
-            <textarea ref={textareaRef} value={code} onChange={(e) => setCode(e.target.value)} onBlur={handleSave}
-              onKeyDown={(e) => {
-                if (e.key === 'Tab') { e.preventDefault(); const start = e.currentTarget.selectionStart; const end = e.currentTarget.selectionEnd; const val = e.currentTarget.value; e.currentTarget.value = val.substring(0, start) + "  " + val.substring(end); e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2; setCode(e.currentTarget.value); }
-                if (e.key === 'Escape') handleSave();
-              }}
-              spellCheck={false}
-              style={{ flex: 1, height: "100%", width: "100%", padding: paddingVal, fontFamily: codeFontFamily, fontSize: "13px", lineHeight: "1.5", border: "none", outline: "none", backgroundColor: "#ffffff", color: "#333", resize: "none", whiteSpace: "pre", display: "block", overflow: "auto" }}
-            />
+            <textarea ref={textareaRef} value={code} onChange={(e) => setCode(e.target.value)} onBlur={handleSave} onKeyDown={(e) => { if (e.key === 'Tab') { e.preventDefault(); const start = e.currentTarget.selectionStart; const end = e.currentTarget.selectionEnd; const val = e.currentTarget.value; e.currentTarget.value = val.substring(0, start) + "  " + val.substring(end); e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2; setCode(e.currentTarget.value); } if (e.key === 'Escape') handleSave(); }} spellCheck={false} style={{ flex: 1, height: "100%", width: "100%", padding: "12px", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", border: "none", outline: "none", backgroundColor: "#ffffff", color: "#333", resize: "none", whiteSpace: "pre", display: "block", overflow: "auto" }} />
           ) : (
             <div onClick={() => setIsEditing(true)} style={{ flex: 1, height: "100%", width: "100%", backgroundColor: "#ffffff", cursor: "text", overflow: "auto" }}>
-              <SyntaxHighlighter language={block.props.language} style={vs} PreTag="div" customStyle={{ margin: 0, padding: paddingVal, backgroundColor: "transparent", fontFamily: codeFontFamily, fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} codeTagProps={{ style: { fontFamily: codeFontFamily, backgroundColor: "transparent" } }} showLineNumbers={true} lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}>
+              <SyntaxHighlighter language={block.props.language} style={vs} PreTag="div" customStyle={{ margin: 0, padding: "12px", backgroundColor: "transparent", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} codeTagProps={{ style: { fontFamily: 'Menlo, Monaco, "Courier New", monospace', backgroundColor: "transparent" } }} showLineNumbers={true} lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}>
                 {code || " "} 
               </SyntaxHighlighter>
               {!code && <div className="export-exclude no-print" style={{position:"absolute", top: 12, left: 60, color: "#ccc", pointerEvents:"none", fontFamily:"sans-serif", fontSize:"13px"}}>点击输入代码...</div>}
             </div>
           )}
-          {!isExpanded && !isEditing && (
-              <div className="export-exclude no-print" style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "60px", background: "linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,1))", pointerEvents: "none", display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "10px" }}>
-                  <div onClick={toggleExpand} style={{pointerEvents:"auto", cursor:"pointer", color:"#3370ff", fontSize:"12px", background:"white", padding:"2px 10px", borderRadius:"12px", border:"1px solid #dee0e3", boxShadow:"0 2px 4px rgba(0,0,0,0.05)"}}>展开更多 ▼</div>
-              </div>
-          )}
+          {!isExpanded && !isEditing && ( <div className="export-exclude no-print" style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "60px", background: "linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,1))", pointerEvents: "none", display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "10px" }}> <div onClick={toggleExpand} style={{pointerEvents:"auto", cursor:"pointer", color:"#3370ff", fontSize:"12px", background:"white", padding:"2px 10px", borderRadius:"12px", border:"1px solid #dee0e3", boxShadow:"0 2px 4px rgba(0,0,0,0.05)"}}>展开更多 ▼</div> </div> )}
         </div>
       </div>
     );
@@ -182,22 +295,15 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
 });
 
 // ==============================================================
-// 📂 自定义文件块
+// 📂 文件块 & LaTeX 块 (保持不变)
 // ==============================================================
 const fileBlockSchema = {
   type: "file" as const,
-  propSchema: {
-    ...defaultProps,
-    name: { default: "Unknown File" },
-    url: { default: "" },
-  },
+  propSchema: { ...defaultProps, name: { default: "Unknown File" }, url: { default: "" }, },
   content: "none" as const,
-
-  // 🔥🔥🔥 关键修改：只导出纯文本链接
   toExternalHTML: (block: any) => {
     const div = document.createElement("div");
     const link = document.createElement("a");
-    // Word 里通常展示为纯文本链接
     link.href = block.props.url; 
     link.innerText = `[附件: ${block.props.name}]`;
     link.style.color = "#1890ff";
@@ -205,55 +311,17 @@ const fileBlockSchema = {
     return { dom: div };
   }
 };
-
 const FileBlock = createReactBlockSpec(fileBlockSchema, {
   render: ({ block }) => {
     const { name, url } = block.props;
-
-    const handleDbClick = async (e: React.MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      try {
-        await invoke("open_file", { url: url }); 
-      } catch (err) {
-        alert("无法打开文件: " + err);
-      }
-    };
-
-    return (
-      <div
-        className={"bn-file-block-content"}
-        onDoubleClick={handleDbClick}
-        style={{
-          display: "flex", alignItems: "center", padding: "10px", margin: "5px 0", border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white", cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%", boxShadow: "0 1px 2px rgba(0,0,0,0.05)"
-        }}
-        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f7f9fb"}
-        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "white"}
-        title="双击打开文件"
-      >
-        <div style={{ fontSize: "24px", marginRight: "12px" }}>📄</div>
-        <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <span style={{ fontSize: "14px", fontWeight: 500, color: "#333", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {name || "未知文件"}
-            </span>
-            <span className="export-exclude no-print" style={{ fontSize: "11px", color: "#999" }}>
-                双击调用系统程序打开
-            </span>
-        </div>
-      </div>
-    );
+    const handleDbClick = async (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); try { await invoke("open_file", { url: url }); } catch (err) { alert("无法打开文件: " + err); } };
+    return ( <div className={"bn-file-block-content"} onDoubleClick={handleDbClick} style={{ display: "flex", alignItems: "center", padding: "10px", margin: "5px 0", border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white", cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f7f9fb"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "white"} title="双击打开文件"> <div style={{ fontSize: "24px", marginRight: "12px" }}>📄</div> <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}> <span style={{ fontSize: "14px", fontWeight: 500, color: "#333", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}> {name || "未知文件"} </span> <span className="export-exclude no-print" style={{ fontSize: "11px", color: "#999" }}> 双击调用系统程序打开 </span> </div> </div> );
   },
 });
-
-// ==============================================================
-// 📐 LaTeX 块
-// ==============================================================
 const latexBlockSchema = { 
     type: "latex" as const, 
     propSchema: { ...defaultProps, text: { default: "" } }, 
     content: "none" as const,
-    
-    // 🔥🔥🔥 关键修改：直接导出 $$ 公式 $$ 文本
     toExternalHTML: (block: any) => {
         const div = document.createElement("p");
         div.innerText = `$$\n${block.props.text}\n$$`;
@@ -261,7 +329,6 @@ const latexBlockSchema = {
         return { dom: div };
     }
 };
-
 const LatexBlock = createReactBlockSpec(latexBlockSchema, {
     render: ({ block, editor }) => {
       const divRef = useRef<HTMLDivElement>(null);
@@ -270,19 +337,7 @@ const LatexBlock = createReactBlockSpec(latexBlockSchema, {
       const textAreaRef = useRef<HTMLTextAreaElement>(null);
       useEffect(() => { try { const decoded = decodeURIComponent(block.props.text); if (decoded !== inputValue) setInputValue(decoded); } catch { if (block.props.text !== inputValue) setInputValue(block.props.text); } }, [block.props.text]);
       useEffect(() => { if (isEditing && textAreaRef.current) textAreaRef.current.focus(); }, [isEditing]);
-      useEffect(() => { 
-          if (!isEditing && divRef.current) { 
-              if (!inputValue) {
-                  divRef.current.innerText = "点击输入 LaTeX 公式...";
-                  divRef.current.style.color = "#ccc";
-              } else {
-                  try { 
-                      katex.render(inputValue, divRef.current, { throwOnError: false, displayMode: true, output: "html" }); 
-                      divRef.current.style.color = "inherit";
-                  } catch (e) { divRef.current.innerText = "⚠️ 公式错误"; }
-              }
-          } 
-      }, [inputValue, isEditing]);
+      useEffect(() => { if (!isEditing && divRef.current) { if (!inputValue) { divRef.current.innerText = "点击输入 LaTeX 公式..."; divRef.current.style.color = "#ccc"; } else { try { katex.render(inputValue, divRef.current, { throwOnError: false, displayMode: true, output: "html" }); divRef.current.style.color = "inherit"; } catch (e) { divRef.current.innerText = "⚠️ 公式错误"; } } } }, [inputValue, isEditing]);
       const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(inputValue) } }); setIsEditing(false); };
       return ( <div style={{ padding: "10px", margin: "5px 0", userSelect: "none" }}> {isEditing ? ( <div className="export-exclude no-print" style={{ display: "flex", flexDirection: "column", gap: "5px" }}> <textarea ref={textAreaRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === "Escape") { setIsEditing(false); setInputValue(block.props.text); } }} onBlur={handleSave} placeholder="输入 LaTeX 公式..." style={{ width: "100%", minHeight: "80px", padding: "10px", fontFamily: "Consolas, Monaco, monospace", fontSize: "14px", borderRadius: "6px", border: "2px solid #1890ff", outline: "none", resize: "vertical", backgroundColor: "#f9f9f9" }} /> <div style={{fontSize: "12px", color: "#888"}}>按 Enter 保存</div> </div> ) : ( <div ref={divRef} onClick={() => setIsEditing(true)} style={{ minHeight: "40px", cursor: "pointer", padding: "10px", borderRadius: "6px", textAlign: "center" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(0,0,0,0.03)"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"} title="点击编辑公式" /> )} </div> );
     },
@@ -293,13 +348,12 @@ const schema = BlockNoteSchema.create({
         ...defaultBlockSpecs, 
         latex: LatexBlock(), 
         codeBlock: CodeBlock(),
-        file: FileBlock() 
+        file: FileBlock(),
+        mermaid: MermaidBlock(),
     } 
 });
 
-// === 🎨 弹窗组件 ===
-// (代码保持不变，为了节省字符，此处省略 CustomDialog 定义，请保留之前的 CustomDialog 代码)
-// 如果你复制时需要完整的，我可以再贴一次，但这里逻辑没变。
+// === 🎨 弹窗组件 (保持不变) ===
 interface FileNode { name: string; path: string; is_dir: boolean; children: FileNode[]; }
 interface TrashItem { name: string; is_dir: boolean; path: string; }
 interface DialogProps { isOpen: boolean; type: 'confirm' | 'prompt' | 'tree-select' | 'settings' | 'alert' | 'save-guard' | 'trash'; title: string; message?: string; defaultValue?: string; treeData?: FileNode[]; disabledPath?: string; trashItems?: TrashItem[]; bgImage?: string | null; bgOpacity?: number; bgBlur?: number; onSetBgImage?: (file: File) => void; onSetBgOpacity?: (val: number) => void; onSetBgBlur?: (val: number) => void; onClearBg?: () => void; onEmptyTrash?: () => void; onRestore?: (name: string) => void; onDeleteForever?: (name: string) => void; onConfirm: (value: any) => void; onCancel: () => void; }
@@ -426,6 +480,12 @@ function App() {
             try { textToSave = decodeURIComponent(block.props.text); } catch { textToSave = block.props.text; }
             finalMarkdown += `\n\`\`\`${block.props.language}\n${textToSave}\n\`\`\`\n`;
         }
+        else if (block.type === "mermaid") {
+            // 🔥 保存 mermaid 到 markdown，包含宽高的元数据
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            // 使用 |w=500|h=300 的格式记录尺寸
+            finalMarkdown += `\n\`\`\`mermaid|w=${block.props.width}|h=${block.props.height}\n${block.props.code}\n\`\`\`\n`;
+        }
         else if (block.type === "file") {
             if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
             finalMarkdown += `\n[FILE:${block.props.name}](${block.props.url})\n`;
@@ -456,6 +516,16 @@ function App() {
       
       const codeBlockMap = new Map();
       let blockIdCounter = 0;
+
+      // 🔥 预处理 mermaid 块 (更新正则支持宽高等参数解析)
+      // 匹配: ```mermaid|w=500|h=300 ... ``` 或旧版 ```mermaid ... ```
+      content = content.replace(/```mermaid(?:\|w=(\d+)\|h=(\d+))?\s*\n([\s\S]*?)```/g, (_match, w, h, code) => {
+          const id = `@@MERMAID_ID_${blockIdCounter++}@@`;
+          const width = w ? parseInt(w) : 500; // 默认 500
+          const height = h ? parseInt(h) : 300; // 默认 300
+          codeBlockMap.set(id, { kind: "mermaid", code: code.trim(), width, height });
+          return id;
+      });
 
       content = content.replace(/```(\S*)\s*\n([\s\S]*?)```/g, (_match, lang, code) => {
           const id = `@@CODE_BLOCK_ID_${blockIdCounter++}@@`;
@@ -488,6 +558,9 @@ function App() {
                       return { type: "codeBlock", props: { text: encodeURIComponent(data.code), language: data.lang }, content: [] };
                   } else if (data.kind === "file") {
                       return { type: "file", props: { name: data.name, url: data.url }, content: [] };
+                  } else if (data.kind === "mermaid") {
+                      // 🔥 加载 Mermaid 块，带尺寸
+                      return { type: "mermaid", props: { code: data.code, width: data.width, height: data.height }, content: [] };
                   }
               }
           }
@@ -512,7 +585,12 @@ function App() {
       return node.name.toLowerCase().includes(term.toLowerCase()) ? node : null; 
     }).filter(Boolean) as FileNode[]; 
   };
-  const displayedTree = useMemo(() => filterNodes(fileTree, searchTerm), [fileTree, searchTerm]);
+  
+  const displayedTree = useMemo(() => {
+      const filtered = filterNodes(fileTree, searchTerm);
+      return sortFileTree(filtered);
+  }, [fileTree, searchTerm]);
+  
   const startResizing = useCallback(() => setIsResizing(true), []);
   const resize = useCallback((e: MouseEvent) => { if (isResizing) setSidebarWidth(Math.max(150, Math.min(e.clientX, 600))); }, [isResizing]);
   useEffect(() => { window.addEventListener("mousemove", resize); window.addEventListener("mouseup", () => setIsResizing(false)); return () => { window.removeEventListener("mousemove", resize); window.removeEventListener("mouseup", () => setIsResizing(false)); }; }, [resize]);
@@ -523,67 +601,109 @@ function App() {
   const handleCreate = async (type: 'folder' | 'note') => { const name = await showDialog('prompt', type === 'folder' ? "新建文件夹" : "新建笔记", { message: "请输入名称：" }); if (!name) return; const basePath = selectedFolder ? `${selectedFolder}/${name}` : name; try { await saveCurrentNote(); if (type === 'folder') await invoke("create_folder", { path: basePath }); else { await invoke("create_note", { path: basePath }); await loadNote(basePath); } await refreshTree(); } catch (e) { alert("创建失败: " + e); } };
   const handleOpenSettings = () => showDialog('settings', '外观设置', { bgImage, bgOpacity, bgBlur, onSetBgImage: updateBgImage, onSetBgOpacity: (v: number) => { setBgOpacity(v); localStorage.setItem("app_bg_opacity", v.toString()); }, onSetBgBlur: (v: number) => { setBgBlur(v); localStorage.setItem("app_bg_blur", v.toString()); }, onClearBg: clearBg });
 
-  const clearBg = async () => {
-        if (bgImage) {
-            try {
-                await invoke("delete_asset", { url: bgImage });
-            } catch (e) {
-                console.error("Delete bg failed", e);
-            }
-        }
-        setBgImage(null);
-        localStorage.removeItem("app_bg_image");
-  };
+  const clearBg = async () => { if (bgImage) { try { await invoke("delete_asset", { url: bgImage }); } catch (e) { console.error("Delete bg failed", e); } } setBgImage(null); localStorage.removeItem("app_bg_image"); };
   const updateBgImage = async (file: File) => { try { const filename = `bg_${new Date().getTime()}_${file.name}`; const payload = Array.from(new Uint8Array(await file.arrayBuffer())); const path = await invoke<string>("save_image", { fileName: filename, payload, notePath: "wallpapers" }); setBgImage(path); localStorage.setItem("app_bg_image", path); } catch (e) { alert("壁纸设置失败: " + e); } };
   const handleOpenTrash = async () => { try { const items = await invoke<TrashItem[]>("get_trash_items"); await showDialog('trash', '回收站', { trashItems: items, onEmptyTrash: async () => { const confirmed = await showDialog('confirm', '清空回收站', { message: "确定清空回收站吗？此操作不可恢复。" }); if (confirmed) { await invoke("empty_trash"); } handleOpenTrash(); }, onRestore: async (path: string) => { await invoke("restore_trash_item", { fileName: path }); await refreshTree(); handleOpenTrash(); }, onDeleteForever: async (path: string) => { const confirmed = await showDialog('confirm', '永久删除', { message: `确定要永久删除 "${path}" 吗？此操作不可恢复。` }); if (confirmed) { await invoke("delete_trash_item", { fileName: path }); } handleOpenTrash(); } }); } catch(e) { alert("打开回收站失败: " + e); } };
+  const renderTree = (nodes: FileNode[], depth = 0) => { return nodes.map(node => { const isExpanded = expandedFolders.has(node.path) || searchTerm.length > 0; const isSelected = selectedFolder === node.path; return ( <div key={node.path}> <div onClick={() => handleSelect(node)} style={{ padding: "6px 10px", paddingLeft: `${depth * 15 + 10}px`, cursor: "pointer", background: (currentFile === node.path) ? "#e6f7ff" : (isSelected && node.is_dir ? "#f0f0f0" : "transparent"), color: currentFile === node.path ? "#1890ff" : "#333", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "14px", borderRadius: "4px", marginBottom: "2px", userSelect: "none" }}> <div style={{ display: "flex", alignItems: "center", overflow: "hidden", flex: 1 }}> <span style={{ marginRight: "4px", fontSize: "10px", width: "14px", textAlign: "center", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.1s ease", color: "#999", visibility: node.is_dir ? "visible" : "hidden" }} onClick={(e) => { e.stopPropagation(); if (node.is_dir) toggleFolder(node.path); }}>▶</span> <span style={{ marginRight: "6px", fontSize: "16px" }}>{node.is_dir ? (isExpanded ? "📂" : "📁") : "📄"}</span> <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{node.name}</span> </div> <div style={{ display: "flex", gap: "2px" }}> <button onClick={(e) => handleMove(e, node)} title="移动" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>➜</button> <button onClick={(e) => handleRename(e, node)} title="重命名" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✏️</button> <button onClick={(e) => handleDelete(e, node.path, node.is_dir)} title="删除" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✕</button> </div> </div> {node.is_dir && isExpanded && (<div>{node.children && node.children.length > 0 ? renderTree(node.children, depth + 1) : <div style={{ paddingLeft: `${(depth + 1) * 15 + 30}px`, fontSize: "12px", color: "#ccc", padding: "4px 0" }}>(空)</div>}</div>)} </div> ); }); };
+  const handleExportPdf = () => { window.print(); };
 
-  const renderTree = (nodes: FileNode[], depth = 0) => {
-    return nodes.map(node => {
-      const isExpanded = expandedFolders.has(node.path) || searchTerm.length > 0;
-      const isSelected = selectedFolder === node.path;
-      return (
-        <div key={node.path}>
-          <div onClick={() => handleSelect(node)} style={{ padding: "6px 10px", paddingLeft: `${depth * 15 + 10}px`, cursor: "pointer", background: (currentFile === node.path) ? "#e6f7ff" : (isSelected && node.is_dir ? "#f0f0f0" : "transparent"), color: currentFile === node.path ? "#1890ff" : "#333", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "14px", borderRadius: "4px", marginBottom: "2px", userSelect: "none" }}>
-            <div style={{ display: "flex", alignItems: "center", overflow: "hidden", flex: 1 }}>
-              <span style={{ marginRight: "4px", fontSize: "10px", width: "14px", textAlign: "center", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.1s ease", color: "#999", visibility: node.is_dir ? "visible" : "hidden" }} onClick={(e) => { e.stopPropagation(); if (node.is_dir) toggleFolder(node.path); }}>▶</span>
-              <span style={{ marginRight: "6px", fontSize: "16px" }}>{node.is_dir ? (isExpanded ? "📂" : "📁") : "📄"}</span>
-              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{node.name}</span>
-            </div>
-            <div style={{ display: "flex", gap: "2px" }}>
-              <button onClick={(e) => handleMove(e, node)} title="移动" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>➜</button>
-              <button onClick={(e) => handleRename(e, node)} title="重命名" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✏️</button>
-              <button onClick={(e) => handleDelete(e, node.path, node.is_dir)} title="删除" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✕</button>
-            </div>
-          </div>
-          {node.is_dir && isExpanded && (<div>{node.children && node.children.length > 0 ? renderTree(node.children, depth + 1) : <div style={{ paddingLeft: `${(depth + 1) * 15 + 30}px`, fontSize: "12px", color: "#ccc", padding: "4px 0" }}>(空)</div>}</div>)}
-        </div>
-      );
-    });
-  };
-
-  // 🔥 导出 PDF：调用浏览器原生打印
-  const handleExportPdf = () => {
-    window.print();
-  };
-
-  // 🔥🔥🔥 导出 Word：DOM 清洗逻辑 (手动移除 export-exclude)
+  // 🔥 Word 导出逻辑 (已兼容自定义大小)
   const handleExportWord = async () => {
     if (!currentFile) return;
+    setStatus("正在导出 Word...");
+    
     try {
-      // 1. 获取 raw HTML
       const rawHtml = await editor.blocksToHTMLLossy(editor.document);
-      
-      // 2. 使用 DOMParser 解析
       const parser = new DOMParser();
       const doc = parser.parseFromString(rawHtml, "text/html");
 
-      // 3. 移除所有不想要的元素
       doc.querySelectorAll('.export-exclude, .bn-block-drag-handle, .bn-side-menu').forEach(el => el.remove());
 
-      // 4. 获取清洗后的 HTML
+      // 1. 处理所有普通图片
+      const images = doc.querySelectorAll('img');
+      for (const img of Array.from(images)) {
+          const src = img.getAttribute('src');
+          if (src) {
+              try {
+                  const imgObj = new Image();
+                  imgObj.src = src;
+                  await new Promise(resolve => {
+                      if (imgObj.complete) resolve(true);
+                      else { imgObj.onload = () => resolve(true); imgObj.onerror = () => resolve(false); }
+                  });
+                  if (imgObj.naturalWidth > 0) {
+                      img.setAttribute('width', imgObj.naturalWidth.toString());
+                      img.setAttribute('height', imgObj.naturalHeight.toString());
+                  }
+                  const response = await fetch(src);
+                  const blob = await response.blob();
+                  const base64 = await new Promise<string>((resolve, reject) => {
+                      const reader = new FileReader();
+                      reader.onloadend = () => resolve(reader.result as string);
+                      reader.onerror = reject;
+                      reader.readAsDataURL(blob);
+                  });
+                  img.setAttribute('src', base64);
+              } catch (e) {
+                  console.warn("Image export warning:", e);
+              }
+          }
+      }
+
+      // 2. 处理 Mermaid 图表
+      const mermaidDivs = doc.querySelectorAll('.mermaid-export-data');
+      if (mermaidDivs.length > 0) {
+          const tempContainer = document.createElement('div');
+          tempContainer.style.position = 'absolute';
+          tempContainer.style.top = '-9999px';
+          tempContainer.style.visibility = 'hidden';
+          document.body.appendChild(tempContainer);
+
+          for (const div of Array.from(mermaidDivs)) {
+              const code = (div as HTMLElement).dataset.code;
+              // 获取用户设置的宽高
+              const targetWidth = parseInt((div as HTMLElement).style.width) || 600;
+
+              if (code) {
+                  try {
+                    const id = `mermaid-export-${Math.random().toString(36).substr(2, 9)}`;
+                    const { svg } = await mermaid.render(id, code);
+                    
+                    const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+                    const url = URL.createObjectURL(svgBlob);
+                    
+                    const img = new Image();
+                    img.src = url;
+                    await new Promise(r => img.onload = r);
+                    
+                    const canvas = document.createElement('canvas');
+                    const scale = 2; 
+                    canvas.width = img.width * scale;
+                    canvas.height = img.height * scale;
+                    const ctx = canvas.getContext('2d');
+                    if (ctx) {
+                        ctx.scale(scale, scale);
+                        ctx.drawImage(img, 0, 0);
+                        const pngBase64 = canvas.toDataURL("image/png");
+                        
+                        const newImg = document.createElement('img');
+                        newImg.src = pngBase64;
+                        newImg.width = targetWidth; // 应用用户设置的宽度
+                        // 高度自动，或者也设置为固定值，Word 中通常设宽度即可
+                        div.replaceWith(newImg);
+                    }
+                    URL.revokeObjectURL(url);
+                  } catch (err) {
+                      console.error("Mermaid export failed", err);
+                      div.innerHTML = `<p style="color:red">[图表导出失败]</p>`;
+                  }
+              }
+          }
+          document.body.removeChild(tempContainer);
+      }
+
       const cleanedHtml = doc.body.innerHTML;
 
-      // 5. 包装
       const fullHtml = `
         <!DOCTYPE html>
         <html>
@@ -591,7 +711,7 @@ function App() {
           <meta charset="UTF-8">
           <style>
             body { font-family: 'Arial', sans-serif; line-height: 1.6; }
-            img { max-width: 100%; }
+            img { max-width: 100%; height: auto; }
             pre { background: #f5f5f5; padding: 10px; border-radius: 6px; white-space: pre-wrap; font-family: monospace; }
             code { font-family: monospace; }
           </style>
@@ -605,7 +725,6 @@ function App() {
         </html>
       `;
 
-      // 6. 保存
       const blob = await asBlob(fullHtml);
       const arrayBuffer = await blob.arrayBuffer();
       const uint8Array = new Uint8Array(arrayBuffer);
@@ -617,17 +736,18 @@ function App() {
 
       if (path) {
         await writeFile(path, uint8Array);
+        setStatus("导出成功");
         alert("导出 Word 成功！");
       }
     } catch (e) {
       console.error(e);
+      setStatus("导出失败");
       alert("导出 Word 失败: " + e);
     }
   };
 
   return (
     <div style={{ height: "100vh", display: "flex", position: "relative" }}>
-      {/* 🔥 全局样式 & 打印专用样式 (修复截图问题) */}
       <style>{`
         button[aria-label*="Download"], button[title*="Download"], [class*="bn-file-block"] [role="button"]:has(svg path[d*="M13 10"]), [class*="bn-image-block"] [role="button"]:has(svg path[d*="M13 10"]), [class*="bn-video-block"] [role="button"]:has(svg path[d*="M13 10"]) { display: none !important; }
         .bn-block-content .bn-block-content { background: transparent !important; padding: 0 !important; }
@@ -635,19 +755,13 @@ function App() {
         pre, code, [class*="language-"] { background: transparent !important; background-color: transparent !important; text-shadow: none !important; }
         .bn-block-content { max-width: 100% !important; }
 
-        /* 🖨️ PDF 导出关键修复：打破高度限制 */
         @media print {
-          /* 隐藏 UI */
           .no-print, .bn-side-menu, .bn-formatting-toolbar, button, .export-exclude { display: none !important; }
-          
-          /* 🔥 强制所有容器高度自适应，允许分页 */
           html, body, #root, div[style*="height: 100vh"] {
             height: auto !important;
             overflow: visible !important;
             display: block !important;
           }
-          
-          /* 针对内容区域 */
           .print-content { 
             position: static !important; 
             width: 100% !important; 
@@ -658,7 +772,6 @@ function App() {
             margin: 0 !important;
             display: block !important;
           }
-          
           .bn-block-content[data-placeholder]::before { display: none !important; }
           body { background: white !important; }
         }
@@ -721,7 +834,8 @@ function App() {
                     const filteredDefaultItems = defaultItems.filter(i => i.title !== "Code Block");
                     const latexItem = { title: "公式 (Math)", onItemClick: () => { const currentBlock = editor.getTextCursorPosition().block; const latexBlock = { type: "latex" as const, props: { text: "" } }; if (editor.getTextCursorPosition().prevBlock) editor.insertBlocks([latexBlock as any], currentBlock, "after"); else editor.insertBlocks([latexBlock as any], currentBlock, "before"); }, aliases: ["latex", "math", "formula", "gs"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>∑</div>, subtext: "插入数学公式" }; 
                     const codeItem = { title: "代码块 (Code)", onItemClick: () => { const currentBlock = editor.getTextCursorPosition().block; const codeBlock = { type: "codeBlock" as const, props: { text: "", language: "cpp" } }; if (editor.getTextCursorPosition().prevBlock) editor.insertBlocks([codeBlock as any], currentBlock, "after"); else editor.insertBlocks([codeBlock as any], currentBlock, "before"); }, aliases: ["code", "c", "js", "ts"], group: "Basic", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>{`</>`}</div>, subtext: "插入代码块" }; 
-                    return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem], query); 
+                    const mermaidItem = { title: "流程图 (Mermaid)", onItemClick: () => { const currentBlock = editor.getTextCursorPosition().block; const mermaidBlock = { type: "mermaid" as const, props: { code: "graph TD;\nA-->B;" } }; if (editor.getTextCursorPosition().prevBlock) editor.insertBlocks([mermaidBlock as any], currentBlock, "after"); else editor.insertBlocks([mermaidBlock as any], currentBlock, "before"); }, aliases: ["flowchart", "mindmap", "graph", "mermaid"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>🧜‍♂️</div>, subtext: "插入思维导图/流程图" };
+                    return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem], query); 
                 }} />
              </BlockNoteView>
           ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}
