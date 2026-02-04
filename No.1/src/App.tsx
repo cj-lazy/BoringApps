@@ -30,9 +30,7 @@ const filterSuggestionItems = (items: any[], query: string) => {
   );
 };
 
-// 排序工具函数 (已优化：修复原地排序导致的状态突变问题)
 const sortFileTree = (nodes: FileNode[]): FileNode[] => {
-    // 🔥 关键修改：使用 [...nodes] 创建副本，避免直接修改 React State
     return [...nodes].sort((a, b) => {
         if (a.is_dir && !b.is_dir) return -1;
         if (!a.is_dir && b.is_dir) return 1;
@@ -45,26 +43,119 @@ const sortFileTree = (nodes: FileNode[]): FileNode[] => {
     });
 };
 
+// 🛠️ 通用拖拽手柄组件
+const ResizeHandle = ({ onResizeStart }: { onResizeStart: (e: React.MouseEvent) => void }) => (
+    <div 
+        onMouseDown={onResizeStart}
+        className="export-exclude no-print"
+        title="拖动调整大小"
+        style={{
+            position: "absolute", bottom: "2px", right: "2px", width: "16px", height: "16px",
+            cursor: "nwse-resize", zIndex: 10, display: "flex", alignItems: "flex-end", justifyContent: "flex-end",
+            background: "rgba(255,255,255,0.7)", borderRadius: "4px"
+        }}
+    >
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <path d="M10 2L2 10H10V2Z" fill="#666"/>
+        </svg>
+    </div>
+);
+
 // ==============================================================
-// 🧜‍♂️ Mermaid (流程图/思维导图) 块 - [已优化支持拖动调整大小]
+// 🖼️ 自定义 Image (图片) 块
+// ==============================================================
+const imageBlockSchema = {
+    type: "image" as const,
+    propSchema: {
+        ...defaultProps,
+        name: { default: "image" },
+        url: { default: "" },
+        width: { default: 500 }, 
+        showPreview: { default: true }
+    },
+    content: "none" as const,
+    toExternalHTML: (block: any) => {
+        const div = document.createElement("div");
+        const img = document.createElement("img");
+        img.src = block.props.url;
+        img.alt = block.props.name;
+        img.setAttribute("width", block.props.width.toString()); 
+        div.appendChild(img);
+        return { dom: div };
+    }
+};
+
+const ImageBlock = createReactBlockSpec(imageBlockSchema, {
+    render: ({ block, editor }) => {
+        const [size, setSize] = useState({ width: block.props.width });
+        const imgRef = useRef<HTMLImageElement>(null);
+
+        useEffect(() => {
+            if (block.props.width !== size.width) {
+                setSize({ width: block.props.width });
+            }
+        }, [block.props.width]);
+
+        const handleResizeStart = (e: React.MouseEvent) => {
+            e.preventDefault(); e.stopPropagation();
+            const startX = e.clientX;
+            const startWidth = size.width;
+
+            const onMouseMove = (moveEvent: MouseEvent) => {
+                const newWidth = Math.max(100, startWidth + (moveEvent.clientX - startX));
+                setSize({ width: newWidth });
+            };
+
+            const onMouseUp = (upEvent: MouseEvent) => {
+                const finalWidth = Math.max(100, startWidth + (upEvent.clientX - startX));
+                editor.updateBlock(block, { props: { ...block.props, width: finalWidth } });
+                window.removeEventListener("mousemove", onMouseMove);
+                window.removeEventListener("mouseup", onMouseUp);
+            };
+
+            window.addEventListener("mousemove", onMouseMove);
+            window.addEventListener("mouseup", onMouseUp);
+        };
+
+        return (
+            <div className="bn-image-block" style={{ position: "relative", display: "inline-block", maxWidth: "100%", margin: "10px 0" }}>
+                <img 
+                    ref={imgRef}
+                    src={block.props.url} 
+                    alt={block.props.name}
+                    draggable={false}
+                    style={{ 
+                        width: `${size.width}px`, 
+                        height: "auto", 
+                        borderRadius: "4px",
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+                        display: "block" 
+                    }} 
+                />
+                <ResizeHandle onResizeStart={handleResizeStart} />
+            </div>
+        );
+    }
+});
+
+
+// ==============================================================
+// 🧜‍♂️ Mermaid (流程图/思维导图) 块
 // ==============================================================
 const mermaidBlockSchema = {
   type: "mermaid" as const,
   propSchema: {
     ...defaultProps,
-    code: { default: "graph TD;\nA-->B;" }, // 默认代码
-    width: { default: 500 }, // 默认宽度
-    height: { default: 300 }, // 默认高度
+    code: { default: "graph TD;\nA-->B;" }, 
+    width: { default: 500 }, 
+    height: { default: 300 },
   },
   content: "none" as const,
-  
-  // 导出逻辑
   toExternalHTML: (block: any) => {
     const div = document.createElement("div");
     div.className = "mermaid-export-data";
     div.dataset.code = block.props.code;
     div.innerText = `[流程图/思维导图]`;
-    // 导出时尝试保持一定的样式提示
     div.style.width = block.props.width + "px";
     div.style.height = block.props.height + "px";
     return { dom: div };
@@ -75,19 +166,13 @@ const MermaidBlock = createReactBlockSpec(mermaidBlockSchema, {
   render: ({ block, editor }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [code, setCode] = useState(block.props.code);
-    
-    // 本地状态用于拖动时的实时渲染，避免频繁触发 block update
     const [size, setSize] = useState({ width: block.props.width, height: block.props.height });
     
     const containerRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
 
-    // 当外部 props 变化（如撤销/重做）时，同步 state
-    useEffect(() => {
-        setSize({ width: block.props.width, height: block.props.height });
-    }, [block.props.width, block.props.height]);
+    useEffect(() => { setSize({ width: block.props.width, height: block.props.height }); }, [block.props.width, block.props.height]);
 
-    // 渲染图表
     useEffect(() => {
         if (containerRef.current && !isEditing) {
             containerRef.current.innerHTML = "";
@@ -105,29 +190,21 @@ const MermaidBlock = createReactBlockSpec(mermaidBlockSchema, {
         setIsEditing(false);
     };
 
-    // === 🖐️ 拖动调整大小逻辑 ===
     const handleResizeStart = (e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        
-        const startX = e.clientX;
-        const startY = e.clientY;
-        const startWidth = size.width;
-        const startHeight = size.height;
+        e.preventDefault(); e.stopPropagation();
+        const startX = e.clientX; const startY = e.clientY;
+        const startWidth = size.width; const startHeight = size.height;
 
         const onMouseMove = (moveEvent: MouseEvent) => {
-            const newWidth = Math.max(200, startWidth + (moveEvent.clientX - startX)); // 最小宽度 200
-            const newHeight = Math.max(100, startHeight + (moveEvent.clientY - startY)); // 最小高度 100
+            const newWidth = Math.max(200, startWidth + (moveEvent.clientX - startX));
+            const newHeight = Math.max(100, startHeight + (moveEvent.clientY - startY));
             setSize({ width: newWidth, height: newHeight });
         };
 
         const onMouseUp = (upEvent: MouseEvent) => {
             const finalWidth = Math.max(200, startWidth + (upEvent.clientX - startX));
             const finalHeight = Math.max(100, startHeight + (upEvent.clientY - startY));
-            
-            // 拖动结束后，一次性更新 Block 属性
             editor.updateBlock(block, { props: { ...block.props, width: finalWidth, height: finalHeight } });
-            
             window.removeEventListener("mousemove", onMouseMove);
             window.removeEventListener("mouseup", onMouseUp);
         };
@@ -137,90 +214,24 @@ const MermaidBlock = createReactBlockSpec(mermaidBlockSchema, {
     };
 
     return (
-        <div 
-            className="mermaid-block-wrapper"
-            style={{ 
-                margin: "10px 0", 
-                border: "1px solid #dee0e3", 
-                borderRadius: "8px", 
-                backgroundColor: "white",
-                width: isEditing ? "100%" : `${size.width}px`, // 编辑模式下全宽，预览模式下使用自定义宽度
-                transition: isEditing ? "width 0.2s" : "none", // 拖动时不需要过渡动画
-                position: "relative",
-                maxWidth: "100%", // 防止溢出页面
-                boxShadow: "0 1px 2px rgba(0,0,0,0.05)"
-            }}
-        >
-            {/* 顶部栏 */}
+        <div className="mermaid-block-wrapper" style={{ margin: "10px 0", border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white", width: isEditing ? "100%" : `${size.width}px`, transition: isEditing ? "width 0.2s" : "none", position: "relative", maxWidth: "100%", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
             <div className="export-exclude no-print" style={{ background: "#f5f6f7", padding: "5px 10px", display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#666", borderBottom: "1px solid #eee", borderTopLeftRadius: "8px", borderTopRightRadius: "8px" }}>
-                <span style={{fontWeight: "bold", display:"flex", alignItems:"center", gap:"5px"}}>🧜‍♂️ 流程图 / 思维导图</span>
-                <button onClick={() => setIsEditing(!isEditing)} style={{ cursor: "pointer", border: "none", background: "transparent", color: "#1890ff" }}>
-                    {isEditing ? "收起预览" : "编辑代码"}
-                </button>
+                <span style={{fontWeight: "bold", display:"flex", alignItems:"center", gap:"5px"}}>🧜‍♂️ 流程图</span>
+                <button onClick={() => setIsEditing(!isEditing)} style={{ cursor: "pointer", border: "none", background: "transparent", color: "#1890ff" }}>{isEditing ? "预览" : "编辑"}</button>
             </div>
-            
-            {/* 内容区 */}
             {isEditing ? (
-                // 编辑模式
-                <textarea 
-                    ref={inputRef}
-                    value={code} 
-                    onChange={(e) => setCode(e.target.value)}
-                    onBlur={handleSaveCode}
-                    placeholder="在此输入 Mermaid 语法..."
-                    style={{ width: "100%", height: "200px", padding: "10px", border: "none", fontFamily: "monospace", fontSize: "13px", resize: "vertical", outline: "none", background: "#fafafa", borderBottomLeftRadius: "8px", borderBottomRightRadius: "8px" }}
-                />
+                <textarea ref={inputRef} value={code} onChange={(e) => setCode(e.target.value)} onBlur={handleSaveCode} style={{ width: "100%", height: "200px", padding: "10px", border: "none", fontFamily: "monospace", fontSize: "13px", resize: "vertical", outline: "none", background: "#fafafa" }} />
             ) : (
-                // 预览模式
-                <div 
-                    ref={containerRef} 
-                    style={{ 
-                        padding: "10px", 
-                        background: "white", 
-                        height: `${size.height}px`, // 应用高度
-                        width: "100%",
-                        overflow: "auto", // 内容过多时出现滚动条
-                        display: "flex", 
-                        justifyContent: "center", 
-                        alignItems: "center",
-                        cursor: "default"
-                    }}
-                    onDoubleClick={() => setIsEditing(true)}
-                />
+                <div ref={containerRef} style={{ padding: "10px", background: "white", height: `${size.height}px`, width: "100%", overflow: "auto", display: "flex", justifyContent: "center", alignItems: "center" }} onDoubleClick={() => setIsEditing(true)} />
             )}
-
-            {/* ↘️ 调整大小手柄 (仅在预览模式显示) */}
-            {!isEditing && (
-                <div 
-                    onMouseDown={handleResizeStart}
-                    className="export-exclude no-print"
-                    title="拖动调整大小"
-                    style={{
-                        position: "absolute",
-                        bottom: "2px",
-                        right: "2px",
-                        width: "16px",
-                        height: "16px",
-                        cursor: "nwse-resize",
-                        zIndex: 10,
-                        display: "flex",
-                        alignItems: "flex-end",
-                        justifyContent: "flex-end",
-                    }}
-                >
-                    {/* 手柄图标样式 */}
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                        <path d="M10 2L2 10H10V2Z" fill="#ccc"/>
-                    </svg>
-                </div>
-            )}
+            {!isEditing && <ResizeHandle onResizeStart={handleResizeStart} />}
         </div>
     );
   }
 });
 
 // ==============================================================
-// 💻 Code 代码块 (保持不变)
+// 💻 Code 代码块
 // ==============================================================
 const codeBlockSchema = {
   type: "codeBlock" as const,
@@ -228,14 +239,13 @@ const codeBlockSchema = {
     ...defaultProps,
     text: { default: "" },      
     language: { default: "cpp" },
+    width: { default: "100%" }, 
+    height: { default: 300 },   
   },
   content: "none" as const, 
   toExternalHTML: (block: any) => {
     const pre = document.createElement("pre");
     pre.style.backgroundColor = "#f0f0f0";
-    pre.style.padding = "8px";
-    pre.style.fontFamily = "Consolas, monospace";
-    pre.style.whiteSpace = "pre-wrap";
     const codeContent = block.props.text || "";
     const lang = block.props.language || "text";
     pre.innerText = `\`\`\`${lang}\n${codeContent}\n\`\`\``;
@@ -249,24 +259,63 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
     const [code, setCode] = useState(() => { try { return decodeURIComponent(block.props.text); } catch { return block.props.text; } });
     const [lang, setLang] = useState(block.props.language);
     const [copyStatus, setCopyStatus] = useState("复制");
-    const [isExpanded, setIsExpanded] = useState(false);
+    const [size, setSize] = useState({ 
+        width: block.props.width === "100%" ? "100%" : parseInt(block.props.width as string), 
+        height: block.props.height 
+    });
+    
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    useEffect(() => { try { const decoded = decodeURIComponent(block.props.text); if (decoded !== code) setCode(decoded); } catch { if (block.props.text !== code) setCode(block.props.text); } if (block.props.language !== lang) setLang(block.props.language); }, [block.props.text, block.props.language]);
+    useEffect(() => { 
+        try { const decoded = decodeURIComponent(block.props.text); if (decoded !== code) setCode(decoded); } catch { if (block.props.text !== code) setCode(block.props.text); } 
+        if (block.props.language !== lang) setLang(block.props.language);
+        if (block.props.width !== size.width || block.props.height !== size.height) {
+             setSize({ 
+                width: block.props.width === "100%" ? "100%" : parseInt(block.props.width as string), 
+                height: block.props.height 
+            });
+        }
+    }, [block.props.text, block.props.language, block.props.width, block.props.height]);
+
     useEffect(() => { if (isEditing && textareaRef.current) { textareaRef.current.focus(); } }, [isEditing]);
 
     const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(code), language: lang } }); setIsEditing(false); };
     const handleCopy = (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(code); setCopyStatus("已复制"); setTimeout(() => setCopyStatus("复制"), 2000); };
-    const toggleExpand = (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); setIsExpanded(!isExpanded); };
+    
+    const handleResizeStart = (e: React.MouseEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        const startX = e.clientX; const startY = e.clientY;
+        const currentW = typeof size.width === 'number' ? size.width : (e.currentTarget.parentElement?.offsetWidth || 600);
+        const startWidth = currentW;
+        const startHeight = size.height;
+
+        const onMouseMove = (moveEvent: MouseEvent) => {
+            const newWidth = Math.max(300, startWidth + (moveEvent.clientX - startX));
+            const newHeight = Math.max(100, startHeight + (moveEvent.clientY - startY));
+            setSize({ width: newWidth, height: newHeight });
+        };
+
+        const onMouseUp = (upEvent: MouseEvent) => {
+            const finalWidth = Math.max(300, startWidth + (upEvent.clientX - startX));
+            const finalHeight = Math.max(100, startHeight + (upEvent.clientY - startY));
+            editor.updateBlock(block, { props: { ...block.props, width: finalWidth.toString(), height: finalHeight } });
+            window.removeEventListener("mousemove", onMouseMove);
+            window.removeEventListener("mouseup", onMouseUp);
+        };
+        window.addEventListener("mousemove", onMouseMove);
+        window.addEventListener("mouseup", onMouseUp);
+    };
 
     const languages = [ { value: "cpp", label: "C++" }, { value: "javascript", label: "JavaScript" }, { value: "typescript", label: "TypeScript" }, { value: "python", label: "Python" }, { value: "java", label: "Java" }, { value: "go", label: "Go" }, { value: "rust", label: "Rust" }, { value: "html", label: "HTML" }, { value: "css", label: "CSS" }, { value: "sql", label: "SQL" }, { value: "bash", label: "Bash" }, { value: "json", label: "JSON" }, { value: "markdown", label: "Markdown" }, { value: "mermaid", label: "Mermaid" } ];
 
     return (
-      <div className="code-block-container" style={{ margin: "15px 0", borderRadius: "6px", border: `1px solid #dee0e3`, backgroundColor: "#ffffff", boxShadow: "0 2px 6px rgba(0,0,0,0.03)", fontFamily: 'Menlo, Monaco, "Courier New", monospace', resize: "both", overflow: "hidden", width: "100%", maxWidth: "100%", display: "flex", flexDirection: "column", position: "relative", height: (isExpanded) ? "auto" : "300px", minHeight: "100px", }} onDoubleClick={(e) => e.stopPropagation()}>
+      <div className="code-block-container" style={{ margin: "15px 0", borderRadius: "6px", border: `1px solid #dee0e3`, backgroundColor: "#ffffff", boxShadow: "0 2px 6px rgba(0,0,0,0.03)", fontFamily: 'Menlo, Monaco, "Courier New", monospace', overflow: "hidden", maxWidth: "100%", display: "flex", flexDirection: "column", position: "relative", 
+          width: typeof size.width === 'number' ? `${size.width}px` : size.width, 
+          height: `${size.height}px` 
+      }} onDoubleClick={(e) => e.stopPropagation()}>
         <div className="code-block-header export-exclude no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", height: "34px", backgroundColor: "#f5f6f7", borderBottom: `1px solid #dee0e3`, userSelect: "none", fontSize: "12px", color: "#646a73", flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', cursor: "pointer" }} onClick={toggleExpand}>
-             <span style={{ marginRight: '6px', fontSize: "12px", transform: isExpanded ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.2s" }}>▼</span>
-             <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块 ({lang})</span>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+             <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块</span>
           </div>
           <div style={{ display: "flex", alignItems: "center" }}>
              <select value={lang} onChange={(e) => { const newLang = e.target.value; setLang(newLang); editor.updateBlock(block, { props: { ...block.props, language: newLang } }); }} onClick={(e) => e.stopPropagation()} style={{ background: "transparent", border: "none", outline: "none", color: "#646a73", cursor: "pointer", fontWeight: 500, fontSize: "12px", fontFamily: "sans-serif", textAlign: "left" }}>
@@ -287,15 +336,15 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
               {!code && <div className="export-exclude no-print" style={{position:"absolute", top: 12, left: 60, color: "#ccc", pointerEvents:"none", fontFamily:"sans-serif", fontSize:"13px"}}>点击输入代码...</div>}
             </div>
           )}
-          {!isExpanded && !isEditing && ( <div className="export-exclude no-print" style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "60px", background: "linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,1))", pointerEvents: "none", display: "flex", justifyContent: "center", alignItems: "flex-end", paddingBottom: "10px" }}> <div onClick={toggleExpand} style={{pointerEvents:"auto", cursor:"pointer", color:"#3370ff", fontSize:"12px", background:"white", padding:"2px 10px", borderRadius:"12px", border:"1px solid #dee0e3", boxShadow:"0 2px 4px rgba(0,0,0,0.05)"}}>展开更多 ▼</div> </div> )}
         </div>
+        {!isEditing && <ResizeHandle onResizeStart={handleResizeStart} />}
       </div>
     );
   }
 });
 
 // ==============================================================
-// 📂 文件块 & LaTeX 块 (保持不变)
+// 📂 文件块 & LaTeX 块
 // ==============================================================
 const fileBlockSchema = {
   type: "file" as const,
@@ -346,6 +395,7 @@ const LatexBlock = createReactBlockSpec(latexBlockSchema, {
 const schema = BlockNoteSchema.create({ 
     blockSpecs: { 
         ...defaultBlockSpecs, 
+        image: ImageBlock(),
         latex: LatexBlock(), 
         codeBlock: CodeBlock(),
         file: FileBlock(),
@@ -353,7 +403,7 @@ const schema = BlockNoteSchema.create({
     } 
 });
 
-// === 🎨 弹窗组件 (保持不变) ===
+// === 🎨 弹窗组件 (保持不变，已添加根目录选项) ===
 interface FileNode { name: string; path: string; is_dir: boolean; children: FileNode[]; }
 interface TrashItem { name: string; is_dir: boolean; path: string; }
 interface DialogProps { isOpen: boolean; type: 'confirm' | 'prompt' | 'tree-select' | 'settings' | 'alert' | 'save-guard' | 'trash'; title: string; message?: string; defaultValue?: string; treeData?: FileNode[]; disabledPath?: string; trashItems?: TrashItem[]; bgImage?: string | null; bgOpacity?: number; bgBlur?: number; onSetBgImage?: (file: File) => void; onSetBgOpacity?: (val: number) => void; onSetBgBlur?: (val: number) => void; onClearBg?: () => void; onEmptyTrash?: () => void; onRestore?: (name: string) => void; onDeleteForever?: (name: string) => void; onConfirm: (value: any) => void; onCancel: () => void; }
@@ -364,10 +414,41 @@ const CustomDialog = (props: DialogProps) => {
   useEffect(() => { if (isOpen) { setInputValue(defaultValue || ""); setExpandedPaths(new Set()); } }, [isOpen, defaultValue]);
   if (!isOpen) return null;
   const renderDialogTree = (nodes: FileNode[], depth = 0) => { return nodes.map(node => { if (!node.is_dir) return null; const isDisabled = disabledPath && (node.path === disabledPath || node.path.startsWith(disabledPath + "/")); const isExpanded = expandedPaths.has(node.path); const isSelected = inputValue === node.path; return ( <div key={node.path}> <div style={{ padding: "6px 8px", paddingLeft: `${depth * 18 + 8}px`, cursor: isDisabled ? "not-allowed" : "pointer", background: isSelected ? "#e6f7ff" : "transparent", color: isDisabled ? "#ccc" : (isSelected ? "#1890ff" : "#333"), borderRadius: "4px", display: "flex", alignItems: "center", marginBottom: "1px", fontSize: "13px" }} onClick={() => { if (isDisabled) return; setInputValue(node.path); }}> <span style={{ marginRight: "6px", width: "12px", display: "inline-block", textAlign: "center", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", cursor: "pointer", color: "#999" }} onClick={(e) => { e.stopPropagation(); const newSet = new Set(expandedPaths); if (newSet.has(node.path)) newSet.delete(node.path); else newSet.add(node.path); setExpandedPaths(newSet); }}>▶</span> <span style={{ marginRight: "4px" }}>{isExpanded ? "📂" : "📁"}</span><span>{node.name}</span> </div> {isExpanded && node.children && <div>{renderDialogTree(node.children, depth + 1)}</div>} </div> ); }); };
-  return ( <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0, 0, 0, 0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2147483647 }} onClick={onCancel}> <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: (type === 'settings' || type === 'trash') ? "500px" : "350px", borderRadius: "12px", boxShadow: "0 10px 25px rgba(0,0,0,0.1)", padding: "24px", display:"flex", flexDirection:"column", maxHeight:"85vh", animation: "popIn 0.2s ease" }}> <h3 style={{ margin: "0 0 10px 0", fontSize: "18px", color: "#333", borderBottom: "1px solid #eee", paddingBottom: "10px", display:"flex", justifyContent:"space-between" }}> {title} {type === 'trash' && <button onClick={onEmptyTrash} style={{fontSize:"12px", color:"#ff4d4f", background:"transparent", border:"none", cursor:"pointer"}}>🗑️ 清空所有</button>} </h3> {message && <p style={{ margin: "0 0 20px 0", fontSize: "14px", color: "#666", lineHeight: "1.5" }}>{message}</p>} {type === 'trash' && ( <div style={{ flex: 1, overflowY: "auto", minHeight: "300px", border: "1px solid #f0f0f0", borderRadius: "6px", padding: "5px" }}> {trashItems && trashItems.length > 0 ? ( trashItems.map(item => ( <div key={item.path} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px", borderBottom:"1px solid #f9f9f9", fontSize:"13px" }}> <div style={{ display:"flex", alignItems:"center", overflow:"hidden" }}> <span style={{ marginRight:"6px" }}>{item.is_dir ? "📂" : "📄"}</span> <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"250px" }} title={item.name}>{item.name}</span> </div> <div style={{ display:"flex", gap:"8px" }}> <button onClick={() => onRestore && onRestore(item.path)} style={{ color:"#1890ff", background:"transparent", border:"none", cursor:"pointer", fontSize:"12px" }}>还原</button> <button onClick={() => onDeleteForever && onDeleteForever(item.path)} style={{ color:"#999", background:"transparent", border:"none", cursor:"pointer", fontSize:"12px" }}>❌</button> </div> </div> )) ) : (<div style={{ padding:"20px", textAlign:"center", color:"#ccc", fontSize:"13px" }}>回收站是空的</div>)} </div> )} {type === 'settings' && ( <div style={{ display: "flex", flexDirection: "column", gap: "20px", marginBottom: "20px" }}> <div> <label style={{ display:"block", fontSize:"13px", fontWeight:"bold", marginBottom:"8px", color:"#555" }}>自定义背景图</label> <div style={{ display: "flex", gap: "10px", alignItems: "center" }}> {bgImage ? (<div style={{ width: "60px", height: "40px", borderRadius: "4px", background: `url(${convertFileSrc(bgImage)}) center/cover`, border: "1px solid #ddd" }}></div>) : (<div style={{ width: "60px", height: "40px", borderRadius: "4px", background: "#f0f0f0", border: "1px dashed #ccc", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"10px", color:"#999" }}>无</div>)} <input type="file" accept="image/*" id="bg-upload" style={{ display: "none" }} onChange={(e) => { if (e.target.files && e.target.files[0] && props.onSetBgImage) props.onSetBgImage(e.target.files[0]); }} /> <button onClick={() => document.getElementById('bg-upload')?.click()} style={{ padding: "6px 12px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>选择图片...</button> {bgImage && <button onClick={props.onClearBg} style={{ padding: "6px 12px", border: "none", background: "#ff4d4f", color: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>清除</button>} </div> </div> <div><label style={{ fontSize:"13px", fontWeight:"bold", color:"#555" }}>白纸浓度: {Math.round((bgOpacity || 0.5) * 100)}%</label><input type="range" min="0.05" max="1" step="0.05" value={bgOpacity} onChange={(e) => props.onSetBgOpacity && props.onSetBgOpacity(parseFloat(e.target.value))} style={{ width: "100%", accentColor: "#1890ff" }} /></div> <div><label style={{ fontSize:"13px", fontWeight:"bold", color:"#555" }}>毛玻璃模糊: {bgBlur} px</label><input type="range" min="0" max="20" step="1" value={bgBlur} onChange={(e) => props.onSetBgBlur && props.onSetBgBlur(parseInt(e.target.value))} style={{ width: "100%", accentColor: "#1890ff" }} /></div> </div> )} {type === 'prompt' && <input autoFocus type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if(e.key === 'Enter') onConfirm(inputValue); }} style={{ width: "100%", padding: "10px", marginBottom: "20px", borderRadius: "6px", border: "1px solid #ddd", fontSize: "14px", outline: "none", boxSizing: "border-box" }} />} {type === 'tree-select' && treeData && (<div style={{ flex: 1, overflowY: "auto", border: "1px solid #eee", borderRadius: "6px", padding: "5px", marginBottom: "20px", minHeight: "200px" }}>{renderDialogTree(treeData)}</div>)} <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "20px" }}> {type !== 'trash' && <button onClick={onCancel} style={{ padding: "8px 16px", border: "1px solid #ddd", borderRadius: "6px", background: "white", color: "#666", cursor: "pointer", fontSize: "14px" }}>取消</button>} <button onClick={() => onConfirm(type === 'prompt' || type === 'tree-select' ? inputValue : true)} style={{ padding: "8px 16px", border: "none", borderRadius: "6px", background: "#1890ff", color: "white", cursor: "pointer", fontSize: "14px", fontWeight: "500" }}>{type === 'trash' ? "关闭" : "确定"}</button> </div> </div> <style>{`@keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }`}</style> </div> );
+  return ( <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0, 0, 0, 0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2147483647 }} onClick={onCancel}> <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: (type === 'settings' || type === 'trash') ? "500px" : "350px", borderRadius: "12px", boxShadow: "0 10px 25px rgba(0,0,0,0.1)", padding: "24px", display:"flex", flexDirection:"column", maxHeight:"85vh", animation: "popIn 0.2s ease" }}> <h3 style={{ margin: "0 0 10px 0", fontSize: "18px", color: "#333", borderBottom: "1px solid #eee", paddingBottom: "10px", display:"flex", justifyContent:"space-between" }}> {title} {type === 'trash' && <button onClick={onEmptyTrash} style={{fontSize:"12px", color:"#ff4d4f", background:"transparent", border:"none", cursor:"pointer"}}>🗑️ 清空所有</button>} </h3> {message && <p style={{ margin: "0 0 20px 0", fontSize: "14px", color: "#666", lineHeight: "1.5" }}>{message}</p>} {type === 'trash' && ( <div style={{ flex: 1, overflowY: "auto", minHeight: "300px", border: "1px solid #f0f0f0", borderRadius: "6px", padding: "5px" }}> {trashItems && trashItems.length > 0 ? ( trashItems.map(item => ( <div key={item.path} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px", borderBottom:"1px solid #f9f9f9", fontSize:"13px" }}> <div style={{ display:"flex", alignItems:"center", overflow:"hidden" }}> <span style={{ marginRight:"6px" }}>{item.is_dir ? "📂" : "📄"}</span> <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"250px" }} title={item.name}>{item.name}</span> </div> <div style={{ display:"flex", gap:"8px" }}> <button onClick={() => onRestore && onRestore(item.path)} style={{ color:"#1890ff", background:"transparent", border:"none", cursor:"pointer", fontSize:"12px" }}>还原</button> <button onClick={() => onDeleteForever && onDeleteForever(item.path)} style={{ color:"#999", background:"transparent", border:"none", cursor:"pointer", fontSize:"12px" }}>❌</button> </div> </div> )) ) : (<div style={{ padding:"20px", textAlign:"center", color:"#ccc", fontSize:"13px" }}>回收站是空的</div>)} </div> )} {type === 'settings' && ( <div style={{ display: "flex", flexDirection: "column", gap: "20px", marginBottom: "20px" }}> <div> <label style={{ display:"block", fontSize:"13px", fontWeight:"bold", marginBottom:"8px", color:"#555" }}>自定义背景图</label> <div style={{ display: "flex", gap: "10px", alignItems: "center" }}> {bgImage ? (<div style={{ width: "60px", height: "40px", borderRadius: "4px", background: `url(${convertFileSrc(bgImage)}) center/cover`, border: "1px solid #ddd" }}></div>) : (<div style={{ width: "60px", height: "40px", borderRadius: "4px", background: "#f0f0f0", border: "1px dashed #ccc", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"10px", color:"#999" }}>无</div>)} <input type="file" accept="image/*" id="bg-upload" style={{ display: "none" }} onChange={(e) => { if (e.target.files && e.target.files[0] && props.onSetBgImage) props.onSetBgImage(e.target.files[0]); }} /> <button onClick={() => document.getElementById('bg-upload')?.click()} style={{ padding: "6px 12px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>选择图片...</button> {bgImage && <button onClick={props.onClearBg} style={{ padding: "6px 12px", border: "none", background: "#ff4d4f", color: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>清除</button>} </div> </div> <div><label style={{ fontSize:"13px", fontWeight:"bold", color:"#555" }}>白纸浓度: {Math.round((bgOpacity || 0.5) * 100)}%</label><input type="range" min="0.05" max="1" step="0.05" value={bgOpacity} onChange={(e) => props.onSetBgOpacity && props.onSetBgOpacity(parseFloat(e.target.value))} style={{ width: "100%", accentColor: "#1890ff" }} /></div> <div><label style={{ fontSize:"13px", fontWeight:"bold", color:"#555" }}>毛玻璃模糊: {bgBlur} px</label><input type="range" min="0" max="20" step="1" value={bgBlur} onChange={(e) => props.onSetBgBlur && props.onSetBgBlur(parseInt(e.target.value))} style={{ width: "100%", accentColor: "#1890ff" }} /></div> </div> )} {type === 'prompt' && <input autoFocus type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if(e.key === 'Enter') onConfirm(inputValue); }} style={{ width: "100%", padding: "10px", marginBottom: "20px", borderRadius: "6px", border: "1px solid #ddd", fontSize: "14px", outline: "none", boxSizing: "border-box" }} />} {type === 'tree-select' && treeData && (
+      <div style={{ flex: 1, overflowY: "auto", border: "1px solid #eee", borderRadius: "6px", padding: "5px", marginBottom: "20px", minHeight: "200px" }}>
+          {/* 🔥 新增：根目录选项 */}
+          <div 
+              onClick={() => setInputValue("")} 
+              style={{ 
+                  padding: "6px 8px", 
+                  paddingLeft: "8px", 
+                  cursor: "pointer", 
+                  background: inputValue === "" ? "#e6f7ff" : "transparent", 
+                  color: inputValue === "" ? "#1890ff" : "#333", 
+                  borderRadius: "4px", 
+                  display: "flex", 
+                  alignItems: "center", 
+                  marginBottom: "1px", 
+                  fontSize: "13px",
+                  fontWeight: "bold"
+              }}
+          >
+              <span style={{ marginRight: "6px", width: "12px", textAlign:"center" }}>🏠</span>
+              <span>根目录</span>
+          </div>
+          {renderDialogTree(treeData)}
+      </div>
+  )} 
+  <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "20px" }}> {type !== 'trash' && <button onClick={onCancel} style={{ padding: "8px 16px", border: "1px solid #ddd", borderRadius: "6px", background: "white", color: "#666", cursor: "pointer", fontSize: "14px" }}>取消</button>} <button onClick={() => onConfirm(type === 'prompt' || type === 'tree-select' ? inputValue : true)} style={{ padding: "8px 16px", border: "none", borderRadius: "6px", background: "#1890ff", color: "white", cursor: "pointer", fontSize: "14px", fontWeight: "500" }}>{type === 'trash' ? "关闭" : "确定"}</button> </div> </div> <style>{`@keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }`}</style> </div> );
 };
 
 // 📦 主程序逻辑
+
+interface TOCItem {
+  id: string;
+  text: string;
+  level: number;
+}
 
 function App() {
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
@@ -381,6 +462,10 @@ function App() {
   const [status, setStatus] = useState("就绪");
   const [lastSaveTime, setLastSaveTime] = useState<string>("");
   
+  // 🔥 目录状态与开关
+  const [toc, setToc] = useState<TOCItem[]>([]);
+  const [isTocOpen, setIsTocOpen] = useState(true);
+
   const isDirtyRef = useRef(false);
   const isLoadingRef = useRef(false);
   const isExitingRef = useRef(false);
@@ -431,8 +516,30 @@ function App() {
     } catch (e) { console.error(e); await showDialog('alert', '上传失败', { message: `错误: ${e}` }); return ""; }
   };
   
+  // 🔥 更新目录逻辑
+  const updateTOC = (editor: any) => {
+      const items: TOCItem[] = [];
+      editor.document.forEach((block: any) => {
+          if (block.type === "heading") {
+              const text = Array.isArray(block.content) 
+                  ? block.content.map((c: any) => c.text).join("") 
+                  : "";
+              if (text) {
+                  items.push({
+                      id: block.id,
+                      text: text,
+                      level: block.props.level
+                  });
+              }
+          }
+      });
+      setToc(items);
+  };
+
   const onEditorChange = () => { 
       if (isExitingRef.current || isLoadingRef.current || !currentFileRef.current) return; 
+      updateTOC(editor);
+
       if (!isDirtyRef.current) { 
           isDirtyRef.current = true; 
           setStatus("● 未保存"); 
@@ -478,17 +585,22 @@ function App() {
             if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
             let textToSave = "";
             try { textToSave = decodeURIComponent(block.props.text); } catch { textToSave = block.props.text; }
-            finalMarkdown += `\n\`\`\`${block.props.language}\n${textToSave}\n\`\`\`\n`;
+            finalMarkdown += `\n\`\`\`${block.props.language}|w=${block.props.width}|h=${block.props.height}\n${textToSave}\n\`\`\`\n`;
         }
         else if (block.type === "mermaid") {
-            // 🔥 保存 mermaid 到 markdown，包含宽高的元数据
             if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
-            // 使用 |w=500|h=300 的格式记录尺寸
             finalMarkdown += `\n\`\`\`mermaid|w=${block.props.width}|h=${block.props.height}\n${block.props.code}\n\`\`\`\n`;
         }
         else if (block.type === "file") {
             if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
             finalMarkdown += `\n[FILE:${block.props.name}](${block.props.url})\n`;
+        }
+        else if (block.type === "image") {
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            const width = block.props.width || 500;
+            const name = block.props.name || "image";
+            const safeName = name.replace(/\|/g, "_"); 
+            finalMarkdown += `\n![${safeName}|w=${width}](${block.props.url})\n`;
         }
         else { standardBlockBuffer.push(block); }
       }
@@ -517,25 +629,40 @@ function App() {
       const codeBlockMap = new Map();
       let blockIdCounter = 0;
 
-      // 🔥 预处理 mermaid 块 (更新正则支持宽高等参数解析)
-      // 匹配: ```mermaid|w=500|h=300 ... ``` 或旧版 ```mermaid ... ```
-      content = content.replace(/```mermaid(?:\|w=(\d+)\|h=(\d+))?\s*\n([\s\S]*?)```/g, (_match, w, h, code) => {
-          const id = `@@MERMAID_ID_${blockIdCounter++}@@`;
-          const width = w ? parseInt(w) : 500; // 默认 500
-          const height = h ? parseInt(h) : 300; // 默认 300
-          codeBlockMap.set(id, { kind: "mermaid", code: code.trim(), width, height });
-          return id;
-      });
-
-      content = content.replace(/```(\S*)\s*\n([\s\S]*?)```/g, (_match, lang, code) => {
+      content = content.replace(/```(\S*?)(?:\|w=(\d+|100%)?\|h=(\d+)?)?\s*\n([\s\S]*?)```/g, (_match, langStr, w, h, code) => {
           const id = `@@CODE_BLOCK_ID_${blockIdCounter++}@@`;
-          codeBlockMap.set(id, { kind: "code", lang: lang || "text", code: code.trim() });
-          return id; 
+          const lang = langStr || "text";
+          const width = w ? (w === "100%" ? "100%" : parseInt(w)) : (lang === "mermaid" ? 500 : "100%");
+          const height = h ? parseInt(h) : 300;
+          
+          if (lang === "mermaid") {
+              codeBlockMap.set(id, { kind: "mermaid", code: code.trim(), width, height });
+          } else {
+              codeBlockMap.set(id, { kind: "code", lang, code: code.trim(), width, height });
+          }
+          return id;
       });
 
       content = content.replace(/\$\$\n([\s\S]*?)\n\$\$/g, (_match, formula) => {
           const id = `@@LATEX_ID_${blockIdCounter++}@@`;
           codeBlockMap.set(id, { kind: "latex", code: formula.trim() });
+          return id;
+      });
+
+      content = content.replace(/!\[(.*?)\]\((.*?)\)/g, (_match, alt, url) => {
+          let width = 500; 
+          let name = alt;
+          
+          if (alt.includes("|w=")) {
+              const parts = alt.split("|w=");
+              name = parts[0];
+              const wVal = parts[1];
+              const parsedWidth = parseInt(wVal); 
+              if (!isNaN(parsedWidth)) width = parsedWidth;
+          }
+
+          const id = `@@IMAGE_ID_${blockIdCounter++}@@`;
+          codeBlockMap.set(id, { kind: "image", name, url, width });
           return id;
       });
 
@@ -555,12 +682,14 @@ function App() {
                   if (data.kind === "latex") {
                       return { type: "latex", props: { text: encodeURIComponent(data.code) }, content: [] };
                   } else if (data.kind === "code") {
-                      return { type: "codeBlock", props: { text: encodeURIComponent(data.code), language: data.lang }, content: [] };
+                      return { type: "codeBlock", props: { text: encodeURIComponent(data.code), language: data.lang, width: data.width, height: data.height }, content: [] };
                   } else if (data.kind === "file") {
                       return { type: "file", props: { name: data.name, url: data.url }, content: [] };
                   } else if (data.kind === "mermaid") {
-                      // 🔥 加载 Mermaid 块，带尺寸
                       return { type: "mermaid", props: { code: data.code, width: data.width, height: data.height }, content: [] };
+                  } 
+                  else if (data.kind === "image") {
+                      return { type: "image", props: { url: data.url, name: data.name, width: data.width }, content: [] };
                   }
               }
           }
@@ -569,7 +698,10 @@ function App() {
 
       editor.replaceBlocks(editor.document, processedBlocks.length === 0 ? [{ type: "paragraph", content: [] }] : processedBlocks); 
       setInitialAssetUrls(getAllAssetUrls(processedBlocks));
-      setCurrentFile(path); isDirtyRef.current = false; setStatus("已加载"); 
+      setCurrentFile(path); 
+      updateTOC(editor);
+      isDirtyRef.current = false; 
+      setStatus("已加载"); 
     } catch (e) { console.error(e); setStatus("加载失败"); } 
     finally { setTimeout(() => { isLoadingRef.current = false; }, 300); }
   };
@@ -607,7 +739,7 @@ function App() {
   const renderTree = (nodes: FileNode[], depth = 0) => { return nodes.map(node => { const isExpanded = expandedFolders.has(node.path) || searchTerm.length > 0; const isSelected = selectedFolder === node.path; return ( <div key={node.path}> <div onClick={() => handleSelect(node)} style={{ padding: "6px 10px", paddingLeft: `${depth * 15 + 10}px`, cursor: "pointer", background: (currentFile === node.path) ? "#e6f7ff" : (isSelected && node.is_dir ? "#f0f0f0" : "transparent"), color: currentFile === node.path ? "#1890ff" : "#333", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "14px", borderRadius: "4px", marginBottom: "2px", userSelect: "none" }}> <div style={{ display: "flex", alignItems: "center", overflow: "hidden", flex: 1 }}> <span style={{ marginRight: "4px", fontSize: "10px", width: "14px", textAlign: "center", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.1s ease", color: "#999", visibility: node.is_dir ? "visible" : "hidden" }} onClick={(e) => { e.stopPropagation(); if (node.is_dir) toggleFolder(node.path); }}>▶</span> <span style={{ marginRight: "6px", fontSize: "16px" }}>{node.is_dir ? (isExpanded ? "📂" : "📁") : "📄"}</span> <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{node.name}</span> </div> <div style={{ display: "flex", gap: "2px" }}> <button onClick={(e) => handleMove(e, node)} title="移动" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>➜</button> <button onClick={(e) => handleRename(e, node)} title="重命名" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✏️</button> <button onClick={(e) => handleDelete(e, node.path, node.is_dir)} title="删除" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✕</button> </div> </div> {node.is_dir && isExpanded && (<div>{node.children && node.children.length > 0 ? renderTree(node.children, depth + 1) : <div style={{ paddingLeft: `${(depth + 1) * 15 + 30}px`, fontSize: "12px", color: "#ccc", padding: "4px 0" }}>(空)</div>}</div>)} </div> ); }); };
   const handleExportPdf = () => { window.print(); };
 
-  // 🔥 Word 导出逻辑 (已兼容自定义大小)
+  // 🔥 Word 导出逻辑
   const handleExportWord = async () => {
     if (!currentFile) return;
     setStatus("正在导出 Word...");
@@ -623,6 +755,9 @@ function App() {
       const images = doc.querySelectorAll('img');
       for (const img of Array.from(images)) {
           const src = img.getAttribute('src');
+          // 🔥 优先读取我们写入的 width 属性
+          const explicitWidth = img.getAttribute('width') || img.style.width;
+          
           if (src) {
               try {
                   const imgObj = new Image();
@@ -631,10 +766,19 @@ function App() {
                       if (imgObj.complete) resolve(true);
                       else { imgObj.onload = () => resolve(true); imgObj.onerror = () => resolve(false); }
                   });
-                  if (imgObj.naturalWidth > 0) {
+
+                  if (explicitWidth && parseInt(explicitWidth) > 0) {
+                       const w = parseInt(explicitWidth);
+                       img.setAttribute('width', w.toString());
+                       if (imgObj.naturalWidth > 0) {
+                           const ratio = imgObj.naturalHeight / imgObj.naturalWidth;
+                           img.setAttribute('height', Math.round(w * ratio).toString());
+                       }
+                  } else if (imgObj.naturalWidth > 0) {
                       img.setAttribute('width', imgObj.naturalWidth.toString());
                       img.setAttribute('height', imgObj.naturalHeight.toString());
                   }
+
                   const response = await fetch(src);
                   const blob = await response.blob();
                   const base64 = await new Promise<string>((resolve, reject) => {
@@ -661,14 +805,12 @@ function App() {
 
           for (const div of Array.from(mermaidDivs)) {
               const code = (div as HTMLElement).dataset.code;
-              // 获取用户设置的宽高
               const targetWidth = parseInt((div as HTMLElement).style.width) || 600;
 
               if (code) {
                   try {
                     const id = `mermaid-export-${Math.random().toString(36).substr(2, 9)}`;
                     const { svg } = await mermaid.render(id, code);
-                    
                     const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
                     const url = URL.createObjectURL(svgBlob);
                     
@@ -685,11 +827,9 @@ function App() {
                         ctx.scale(scale, scale);
                         ctx.drawImage(img, 0, 0);
                         const pngBase64 = canvas.toDataURL("image/png");
-                        
                         const newImg = document.createElement('img');
                         newImg.src = pngBase64;
-                        newImg.width = targetWidth; // 应用用户设置的宽度
-                        // 高度自动，或者也设置为固定值，Word 中通常设宽度即可
+                        newImg.width = targetWidth; 
                         div.replaceWith(newImg);
                     }
                     URL.revokeObjectURL(url);
@@ -744,6 +884,31 @@ function App() {
       setStatus("导出失败");
       alert("导出 Word 失败: " + e);
     }
+  };
+  
+  // 插入块的辅助函数
+  const insertOrReplaceBlock = (editor: any, blockObj: any) => {
+    const currentPos = editor.getTextCursorPosition();
+    const currentBlock = currentPos.block;
+    const isEmpty = Array.isArray(currentBlock.content) && currentBlock.content.length === 0;
+
+    if (isEmpty) {
+        editor.replaceBlocks([currentBlock], [blockObj]);
+    } else {
+        if (currentPos.prevBlock) {
+             editor.insertBlocks([blockObj], currentBlock, "after");
+        } else {
+             editor.insertBlocks([blockObj], currentBlock, "after");
+        }
+    }
+  };
+
+  // 🔥 目录点击跳转逻辑
+  const jumpToBlock = (id: string) => {
+     const element = document.querySelector(`[data-block-id="${id}"]`);
+     if (element) {
+         element.scrollIntoView({ behavior: "smooth", block: "center" });
+     }
   };
 
   return (
@@ -805,9 +970,32 @@ function App() {
         {/* 顶部栏 */}
         <div className="no-print" style={{ padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
           <div style={{display: 'flex', alignItems: 'center'}}>
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={{ border: "none", background: "transparent", cursor: "pointer" }}>{isSidebarOpen ? "◀" : "▶"}</button>
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={{ border: "none", background: "transparent", cursor: "pointer", marginRight: "10px" }}>{isSidebarOpen ? "◀" : "▶"}</button>
+            {/* 目录切换按钮 */}
             {currentFile && (
-                <span style={{ marginLeft: "20px", fontSize: "12px", color: "#999", transition: "opacity 0.3s" }}>
+                <button 
+                    onClick={() => setIsTocOpen(!isTocOpen)} 
+                    title={isTocOpen ? "收起大纲" : "展开大纲"}
+                    style={{ 
+                        border: "1px solid #eee", 
+                        background: isTocOpen ? "#e6f7ff" : "white", 
+                        color: isTocOpen ? "#1890ff" : "#666",
+                        cursor: "pointer", 
+                        borderRadius: "4px",
+                        padding: "2px 6px",
+                        fontSize: "12px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        marginRight: "15px"
+                    }}
+                >
+                    <span>{isTocOpen ? "📖" : "📘"}</span>
+                    <span>大纲</span>
+                </button>
+            )}
+            {currentFile && (
+                <span style={{ fontSize: "12px", color: "#999", transition: "opacity 0.3s" }}>
                     {lastSaveTime ? `上次保存: ${lastSaveTime}` : ""}
                 </span>
             )}
@@ -825,20 +1013,94 @@ function App() {
           </div>
         </div>
         
-        {/* 底部留白 */}
-        <div style={{ flex: 1, overflow: "auto", padding: "40px 60px", paddingBottom: "50vh", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
-          {currentFile ? (
-             <BlockNoteView key={currentFile} editor={editor} onChange={onEditorChange} theme="light" slashMenu={false}>
-                <SuggestionMenuController triggerCharacter={"/"} getItems={async (query) => { 
-                    const defaultItems = getDefaultReactSlashMenuItems(editor); 
-                    const filteredDefaultItems = defaultItems.filter(i => i.title !== "Code Block");
-                    const latexItem = { title: "公式 (Math)", onItemClick: () => { const currentBlock = editor.getTextCursorPosition().block; const latexBlock = { type: "latex" as const, props: { text: "" } }; if (editor.getTextCursorPosition().prevBlock) editor.insertBlocks([latexBlock as any], currentBlock, "after"); else editor.insertBlocks([latexBlock as any], currentBlock, "before"); }, aliases: ["latex", "math", "formula", "gs"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>∑</div>, subtext: "插入数学公式" }; 
-                    const codeItem = { title: "代码块 (Code)", onItemClick: () => { const currentBlock = editor.getTextCursorPosition().block; const codeBlock = { type: "codeBlock" as const, props: { text: "", language: "cpp" } }; if (editor.getTextCursorPosition().prevBlock) editor.insertBlocks([codeBlock as any], currentBlock, "after"); else editor.insertBlocks([codeBlock as any], currentBlock, "before"); }, aliases: ["code", "c", "js", "ts"], group: "Basic", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>{`</>`}</div>, subtext: "插入代码块" }; 
-                    const mermaidItem = { title: "流程图 (Mermaid)", onItemClick: () => { const currentBlock = editor.getTextCursorPosition().block; const mermaidBlock = { type: "mermaid" as const, props: { code: "graph TD;\nA-->B;" } }; if (editor.getTextCursorPosition().prevBlock) editor.insertBlocks([mermaidBlock as any], currentBlock, "after"); else editor.insertBlocks([mermaidBlock as any], currentBlock, "before"); }, aliases: ["flowchart", "mindmap", "graph", "mermaid"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>🧜‍♂️</div>, subtext: "插入思维导图/流程图" };
-                    return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem], query); 
-                }} />
-             </BlockNoteView>
-          ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}
+        {/* 内容容器：左侧目录 + 右侧编辑器 */}
+        <div style={{ flex: 1, display: "flex", overflow: "hidden", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
+            
+            {/* 左侧目录栏 (带平滑过渡动画) */}
+            <div className="no-print" style={{ 
+                width: (currentFile && isTocOpen) ? "200px" : "0px", 
+                overflow: "hidden", // 隐藏超出内容
+                opacity: (currentFile && isTocOpen) ? 1 : 0,
+                padding: (currentFile && isTocOpen) ? "20px 10px" : "0px",
+                borderRight: (currentFile && isTocOpen) ? "1px solid rgba(0,0,0,0.05)" : "none",
+                flexShrink: 0,
+                fontSize: "13px",
+                color: "#555",
+                transition: "width 0.3s ease, padding 0.3s ease, opacity 0.2s ease, border-right 0.3s", // 添加过渡动画
+                whiteSpace: "nowrap" // 防止文字换行
+            }}>
+                <div style={{ fontWeight: "bold", marginBottom: "10px", paddingLeft: "5px", color: "#333", fontSize: "12px" }}>大纲</div>
+                {toc.length === 0 ? (
+                    <div style={{ paddingLeft: "5px", color: "#999", fontSize: "12px" }}>无标题</div>
+                ) : (
+                    toc.map((item) => (
+                        <div 
+                            key={item.id} 
+                            onClick={() => jumpToBlock(item.id)}
+                            title={item.text}
+                            style={{ 
+                                padding: "4px 8px", 
+                                marginLeft: `${(item.level - 1) * 12}px`, 
+                                cursor: "pointer",
+                                borderRadius: "4px",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                color: "#666",
+                                transition: "background 0.1s"
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(0,0,0,0.04)"}
+                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+                        >
+                            {item.text}
+                        </div>
+                    ))
+                )}
+            </div>
+
+            {/* 编辑器滚动区域 */}
+            <div style={{ 
+                flex: 1, 
+                overflow: "auto", 
+                padding: "40px 60px", 
+                paddingBottom: "50vh",
+                transition: "padding 0.3s ease" // 编辑器区域也平滑过渡
+            }}>
+              {currentFile ? (
+                 <BlockNoteView key={currentFile} editor={editor} onChange={onEditorChange} theme="light" slashMenu={false}>
+                    <SuggestionMenuController triggerCharacter={"/"} getItems={async (query) => { 
+                        const defaultItems = getDefaultReactSlashMenuItems(editor); 
+                        const filteredDefaultItems = defaultItems.filter(i => i.title !== "Code Block");
+                        
+                        const latexItem = { 
+                            title: "公式 (Math)", 
+                            onItemClick: () => { 
+                                const latexBlock = { type: "latex" as const, props: { text: "" } }; 
+                                insertOrReplaceBlock(editor, latexBlock);
+                            }, 
+                            aliases: ["latex", "math", "formula", "gs"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>∑</div>, subtext: "插入数学公式" 
+                        }; 
+                        const codeItem = { 
+                            title: "代码块 (Code)", 
+                            onItemClick: () => { 
+                                const codeBlock = { type: "codeBlock" as const, props: { text: "", language: "cpp" } }; 
+                                insertOrReplaceBlock(editor, codeBlock);
+                            }, 
+                            aliases: ["code", "c", "js", "ts"], group: "Basic", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>{`</>`}</div>, subtext: "插入代码块" 
+                        }; 
+                        const mermaidItem = { 
+                            title: "流程图 (Mermaid)", 
+                            onItemClick: () => { 
+                                const mermaidBlock = { type: "mermaid" as const, props: { code: "graph TD;\nA-->B;" } }; 
+                                insertOrReplaceBlock(editor, mermaidBlock);
+                            }, 
+                            aliases: ["flowchart", "mindmap", "graph", "mermaid"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>🧜‍♂️</div>, subtext: "插入思维导图/流程图" 
+                        };
+                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem], query); 
+                    }} />
+                 </BlockNoteView>
+              ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}
+            </div>
         </div>
       </div>
     </div>
