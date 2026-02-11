@@ -1,0 +1,130 @@
+<view class="container">
+  
+  <view class="navbar">
+    <view class="nav-top-row">
+      <view class="btn-pill black" bindtap="toggleMenu" wx:if="{{!isGuest}}">
+        <text class="icon-swap">⇄</text> 切换主题
+      </view>
+      <view class="tag-guest" wx:else>👋 访客模式</view>
+
+      <view class="btn-pill white" bindtap="toggleEdit" wx:if="{{!isGuest}}">
+        <text class="icon-edit">✎</text> {{isEditMode ? '完成' : '编辑选项'}}
+      </view>
+    </view>
+
+    <view class="nav-bottom-row">
+      <text class="app-title">{{currentTheme.name}}</text>
+    </view>
+  </view>
+
+  <view class="stage" wx:if="{{!isEditMode && !showMenu}}">
+    <view class="pop-card">
+      <view class="card-header"><text class="icon-big">{{currentTheme.icon}}</text></view>
+      <view class="card-body">
+        <text class="result-text {{isRunning ? 'shaking-text' : ''}}">{{displayItem}}</text>
+      </view>
+      <view class="card-footer">
+        <text class="status-dot {{isRunning ? 'green' : 'red'}}"></text>
+        <text class="status-text">{{isRunning ? '随机中...' : '准备就绪'}}</text>
+      </view>
+    </view>
+
+    <view class="stats-entry" bindtap="showStatsModal">
+      <block wx:if="{{topPick}}">
+        <text class="stats-label">👑 榜首</text>
+        <text class="stats-val">{{topPick.name}}</text>
+        <text class="stats-count">({{topPick.count}}次)</text>
+        <text class="stats-arrow">📊</text>
+      </block>
+      <block wx:else>
+        <text class="stats-label">📜 暂无战绩</text>
+        <text class="stats-hint">点击查看历史 >></text>
+      </block>
+    </view>
+
+    <view class="action-area">
+      <button class="btn-main" bindtap="manualToggle" hover-class="btn-pressed">
+        {{isRunning ? '停止 (STOP)' : '开始 (START)'}}
+      </button>
+
+      <button class="btn-link" open-type="share" wx:if="{{!isGuest}}">
+        邀请好友做决定 ➔
+      </button>
+      
+      <view wx:if="{{isGuest}}" style="margin-top:20rpx; width:100%">
+        <button class="btn-secondary" bindtap="saveSharedTheme">📥 保存此主题</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="sheet" wx:if="{{isEditMode && !showMenu}}">
+    <view class="sheet-header">
+      <text>管理选项</text>
+      <view class="sheet-close" bindtap="toggleEdit">×</view>
+    </view>
+    <view class="input-zone">
+      <input class="pop-input" placeholder="输入新选项..." value="{{inputValue}}" bindinput="onInput" confirm-type="done" bindconfirm="addItem"/>
+      <view class="btn-add" bindtap="addItem">＋</view>
+    </view>
+    <scroll-view scroll-y class="list-zone">
+      <view class="list-item" wx:for="{{currentTheme.items}}" wx:key="index">
+        <text class="item-name">{{item.name}}</text>
+        <view class="item-actions">
+          <view class="weight-pill" catchtap="changeWeight" data-index="{{index}}">
+            <text class="star-gold">⭐</text>
+            <text class="weight-num">{{item.weight ? item.weight : 1}}</text>
+            <text class="weight-arrow">▼</text>
+          </view>
+          <view class="btn-del" bindtap="deleteItem" data-index="{{index}}">删除</view>
+        </view>
+      </view>
+      <button class="btn-danger" bindtap="deleteTheme" wx:if="{{themes.length > 1}}">删除当前主题</button>
+      <view style="height: 150rpx;"></view>
+    </scroll-view>
+  </view>
+
+  <view class="mask {{showMenu ? 'visible' : ''}}" bindtap="toggleMenu">
+    <view class="drawer {{showMenu ? 'open' : ''}}" catchtap="stopBubble">
+      <view class="drawer-header">切换主题</view>
+      <scroll-view scroll-y class="drawer-list">
+        <view class="drawer-item {{currentThemeIndex === index ? 'active' : ''}}" wx:for="{{themes}}" wx:key="index" bindtap="switchTheme" data-index="{{index}}">
+          <text class="d-icon">{{item.icon}}</text>
+          <text class="d-name">{{item.name}}</text>
+          <view class="d-arrow" wx:if="{{currentThemeIndex === index}}">●</view>
+        </view>
+      </scroll-view>
+      <view class="drawer-footer">
+        <view class="divider-text">新建主题</view>
+        <view class="new-theme-row">
+          <input class="pop-input small" placeholder="主题名" value="{{newThemeName}}" bindinput="onThemeInput"/>
+          <input class="pop-input mini" placeholder="动词" value="{{newThemeVerb}}" bindinput="onThemeVerbInput"/>
+        </view>
+        <button class="btn-create" bindtap="addNewTheme">添加并保存</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="mask {{showStats ? 'visible' : ''}}" bindtap="closeStats">
+    <view class="pop-modal" catchtap="stopBubble">
+      <view class="modal-head">
+        <text>历史统计</text>
+        <view bindtap="closeStats" style="font-size:40rpx">×</view>
+      </view>
+      <view class="hero-block" wx:if="{{topPick}}">
+        <text class="crown">👑</text>
+        <text class="hero-title">{{topPick.name}}</text>
+        <text class="hero-desc">共 {{currentVerb}} 了 {{topPick.count}} 次</text>
+      </view>
+      <scroll-view scroll-y class="stat-list">
+        <view class="stat-row" wx:for="{{statsData}}" wx:key="name">
+          <text class="s-name">{{item.name}}</text>
+          <view class="progress-box">
+            <view class="progress-bar" style="width: {{item.percent}}%"></view>
+          </view>
+          <text class="s-num">{{item.count}}</text>
+        </view>
+      </scroll-view>
+      <button class="btn-clear" bindtap="clearHistory" wx:if="{{topPick}}">🗑️ 清空当前记录</button>
+    </view>
+  </view>
+</view>
