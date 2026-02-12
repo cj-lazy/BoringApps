@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "portable-note"
-version = "2.2.0"
+version = "3.0.0"
 dependencies = [
  "open",
  "percent-encoding",
