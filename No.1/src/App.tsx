@@ -5,7 +5,11 @@ import "@blocknote/mantine/style.css";
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-import { writeFile } from "@tauri-apps/plugin-fs"; 
+import { writeFile } from "@tauri-apps/plugin-fs";
+import mammoth from "mammoth";
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 import katex from "katex";
 import "katex/dist/katex.min.css"; 
@@ -346,6 +350,21 @@ const CodeBlock = createReactBlockSpec(codeBlockSchema, {
 // ==============================================================
 // 📂 文件块 & LaTeX 块
 // ==============================================================
+const getFileType = (name: string): 'image' | 'text' | 'docx' | 'pdf' | 'other' => {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  const imageExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
+  const textExts = ['txt','md','json','xml','csv','log','js','ts','jsx','tsx','py','java',
+                    'c','cpp','h','hpp','rs','go','rb','php','html','css','scss','less',
+                    'sh','bash','yml','yaml','toml','ini','cfg','conf'];
+  const docxExts = ['docx'];
+  const pdfExts = ['pdf'];
+  if (imageExts.includes(ext)) return 'image';
+  if (textExts.includes(ext)) return 'text';
+  if (docxExts.includes(ext)) return 'docx';
+  if (pdfExts.includes(ext)) return 'pdf';
+  return 'other';
+};
+
 const fileBlockSchema = {
   type: "file" as const,
   propSchema: { ...defaultProps, name: { default: "Unknown File" }, url: { default: "" }, },
@@ -363,8 +382,148 @@ const fileBlockSchema = {
 const FileBlock = createReactBlockSpec(fileBlockSchema, {
   render: ({ block }) => {
     const { name, url } = block.props;
-    const handleDbClick = async (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); try { await invoke("open_file", { url: url }); } catch (err) { alert("无法打开文件: " + err); } };
-    return ( <div className={"bn-file-block-content"} onDoubleClick={handleDbClick} style={{ display: "flex", alignItems: "center", padding: "10px", margin: "5px 0", border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white", cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f7f9fb"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "white"} title="双击打开文件"> <div style={{ fontSize: "24px", marginRight: "12px" }}>📄</div> <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}> <span style={{ fontSize: "14px", fontWeight: 500, color: "#333", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}> {name || "未知文件"} </span> <span className="export-exclude no-print" style={{ fontSize: "11px", color: "#999" }}> 双击调用系统程序打开 </span> </div> </div> );
+    const [preview, setPreview] = useState<string | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [isExpanded, setIsExpanded] = useState(true);
+    const fileType = getFileType(name || '');
+
+    useEffect(() => {
+      if (fileType === 'other') return;
+      if (fileType === 'image') {
+        setPreview(url);
+        return;
+      }
+      // PDF: render first page as image
+      if (fileType === 'pdf') {
+        let cancelled = false;
+        setLoading(true);
+        (async () => {
+          try {
+            const pdf = await pdfjsLib.getDocument({ url }).promise;
+            const page = await pdf.getPage(1);
+            const viewport = page.getViewport({ scale: 1.5 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) throw new Error('no canvas context');
+            await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+            if (!cancelled) setPreview(canvas.toDataURL());
+          } catch { if (!cancelled) setPreview(null); }
+          finally { if (!cancelled) setLoading(false); }
+        })();
+        return () => { cancelled = true; };
+      }
+      // Word docx: extract raw text via mammoth
+      if (fileType === 'docx') {
+        let cancelled = false;
+        setLoading(true);
+        (async () => {
+          try {
+            const response = await fetch(url);
+            const arrayBuffer = await response.arrayBuffer();
+            const result = await mammoth.extractRawText({ arrayBuffer });
+            if (!cancelled) setPreview(result.value);
+          } catch { if (!cancelled) setPreview(null); }
+          finally { if (!cancelled) setLoading(false); }
+        })();
+        return () => { cancelled = true; };
+      }
+      // Text file: read full content
+      let cancelled = false;
+      setLoading(true);
+      (async () => {
+        try {
+          const response = await fetch(url);
+          const content = await response.text();
+          if (!cancelled) setPreview(content);
+        } catch { if (!cancelled) setPreview(null); }
+        finally { if (!cancelled) setLoading(false); }
+      })();
+      return () => { cancelled = true; };
+    }, [url, fileType]);
+
+    const handleDbClick = async (e: React.MouseEvent) => {
+      e.preventDefault(); e.stopPropagation();
+      try { await invoke("open_file", { url: url }); }
+      catch (err) { alert("无法打开文件: " + err); }
+    };
+
+    const iconMap: Record<string, string> = { image: '🖼️', text: '📝', docx: '📝', pdf: '📕', other: '📄' };
+
+    const previewStyle: React.CSSProperties = {
+      margin: 0, padding: "10px", fontSize: "11px", lineHeight: "1.5", color: "#555",
+      whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "300px",
+      overflowY: "auto", fontFamily: 'Menlo, Monaco, "Courier New", monospace'
+    };
+
+    return (
+      <div className={"bn-file-block-content"} onDoubleClick={handleDbClick}
+        style={{ display: "flex", flexDirection: "column", padding: "10px", margin: "5px 0",
+          border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white",
+          cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%",
+          boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}
+        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f7f9fb"}
+        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "white"}
+        title="双击打开文件">
+
+        {/* Header row */}
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <div style={{ fontSize: "24px", marginRight: "12px" }}>{iconMap[fileType] || '📄'}</div>
+          <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", flex: 1 }}>
+            <span style={{ fontSize: "14px", fontWeight: 500, color: "#333", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {name || "未知文件"}
+            </span>
+            <span className="export-exclude no-print" style={{ fontSize: "11px", color: "#999" }}>
+              双击调用系统程序打开
+            </span>
+          </div>
+          {/* Toggle expand/collapse - only for previewable types */}
+          {fileType !== 'other' && (
+            <button onClick={(e) => { e.stopPropagation(); setIsExpanded(!isExpanded); }}
+              className="export-exclude no-print"
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "12px", padding: "2px 6px", color: "#999", borderRadius: "4px" }}
+              title={isExpanded ? "收起预览" : "展开预览"}>
+              {isExpanded ? '▼' : '▶'}
+            </button>
+          )}
+        </div>
+
+        {/* Preview area - collapsible */}
+        {isExpanded && fileType === 'image' && preview && (
+          <div style={{ marginTop: "8px", borderRadius: "6px", overflow: "hidden", border: "1px solid #f0f0f0" }}>
+            <img src={preview} alt={name} style={{ maxWidth: "100%", maxHeight: "200px", display: "block", objectFit: "contain" }}
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+          </div>
+        )}
+        {isExpanded && fileType === 'pdf' && (
+          <div style={{ marginTop: "8px", borderRadius: "6px", overflow: "hidden", border: "1px solid #f0f0f0" }}>
+            {loading ? (
+              <div style={{ padding: "20px", fontSize: "12px", color: "#999", textAlign: "center" }}>解析 PDF 中...</div>
+            ) : preview ? (
+              <img src={preview} alt={name} style={{ maxWidth: "100%", maxHeight: "300px", display: "block", objectFit: "contain", cursor: "pointer" }}
+                onClick={handleDbClick} title="双击打开原文件"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+            ) : (
+              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>无法预览</div>
+            )}
+          </div>
+        )}
+        {isExpanded && (fileType === 'text' || fileType === 'docx') && (
+          <div style={{ marginTop: "8px", borderRadius: "6px", overflow: "hidden", border: "1px solid #f0f0f0", backgroundColor: "#fafafa" }}>
+            {loading ? (
+              <div style={{ padding: "12px", fontSize: "12px", color: "#999" }}>
+                {fileType === 'docx' ? '解析 Word 文档中...' : '加载预览中...'}
+              </div>
+            ) : preview ? (
+              <pre style={previewStyle}>{preview}</pre>
+            ) : (
+              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>无法预览</div>
+            )}
+          </div>
+        )}
+      </div>
+    );
   },
 });
 const latexBlockSchema = { 
@@ -562,6 +721,32 @@ function App() {
   
   const handleBackgroundClick = (e: React.MouseEvent) => { if (e.target === e.currentTarget) setSelectedFolder(null); };
 
+  // 🔥 编码行间空格：将2个以上连续空格转为 &nbsp; 以绕过 rehype-minify-whitespace
+  const encodeSpacesInBlocks = (blocks: any[]): any[] => {
+    const encode = (text: string): string =>
+      text.replace(/ {2,}/g, (m) => ' '.repeat(m.length));
+
+    return blocks.map((block) => {
+      const cloned = JSON.parse(JSON.stringify(block));
+      // Handle empty paragraph: insert &nbsp; so markdown round-trip preserves it
+      const isEmptyParagraph = cloned.type === 'paragraph' && (
+        !Array.isArray(cloned.content) || cloned.content.length === 0 ||
+        (cloned.content.length === 1 && cloned.content[0].type === 'text' && !cloned.content[0].text)
+      );
+      if (isEmptyParagraph) {
+        cloned.content = [{ type: 'text', text: ' ', styles: {} }];
+      } else if (Array.isArray(cloned.content)) {
+        for (const node of cloned.content) {
+          if (typeof node.text === 'string') node.text = encode(node.text);
+        }
+      }
+      if (Array.isArray(cloned.children)) {
+        cloned.children = encodeSpacesInBlocks(cloned.children);
+      }
+      return cloned;
+    });
+  };
+
   const saveCurrentNote = async () => {
     const fileToSave = currentFileRef.current;
     if (!fileToSave) return;
@@ -576,27 +761,27 @@ function App() {
       let standardBlockBuffer: typeof currentBlocks = [];
       for (const block of currentBlocks) {
         if (block.type === "latex") {
-            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
             let decodedLatex = "";
             try { decodedLatex = decodeURIComponent(block.props.text); } catch { decodedLatex = block.props.text; }
             finalMarkdown += `\n$$\n${decodedLatex}\n$$\n`;
         } 
         else if (block.type === "codeBlock") {
-            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
             let textToSave = "";
             try { textToSave = decodeURIComponent(block.props.text); } catch { textToSave = block.props.text; }
             finalMarkdown += `\n\`\`\`${block.props.language}|w=${block.props.width}|h=${block.props.height}\n${textToSave}\n\`\`\`\n`;
         }
         else if (block.type === "mermaid") {
-            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
             finalMarkdown += `\n\`\`\`mermaid|w=${block.props.width}|h=${block.props.height}\n${block.props.code}\n\`\`\`\n`;
         }
         else if (block.type === "file") {
-            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
             finalMarkdown += `\n[FILE:${block.props.name}](${block.props.url})\n`;
         }
         else if (block.type === "image") {
-            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer); standardBlockBuffer = []; }
+            if (standardBlockBuffer.length > 0) { finalMarkdown += await editor.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
             const width = block.props.width || 500;
             const name = block.props.name || "image";
             const safeName = name.replace(/\|/g, "_"); 
@@ -604,7 +789,7 @@ function App() {
         }
         else { standardBlockBuffer.push(block); }
       }
-      if (standardBlockBuffer.length > 0) finalMarkdown += await editor.blocksToMarkdownLossy(standardBlockBuffer);
+      if (standardBlockBuffer.length > 0) finalMarkdown += await editor.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer));
 
       await invoke("save_note", { path: fileToSave, content: finalMarkdown });
       setInitialAssetUrls(currentAssetUrls);
@@ -695,6 +880,18 @@ function App() {
           }
           return block;
       });
+
+      // Clean up &nbsp; placeholder used to preserve empty paragraphs
+      const cleanNbsp = (blocks: any[]) => {
+        for (const b of blocks) {
+          if (b.type === 'paragraph' && Array.isArray(b.content) &&
+              b.content.length === 1 && b.content[0].text === ' ') {
+            b.content = [];
+          }
+          if (b.children) cleanNbsp(b.children);
+        }
+      };
+      cleanNbsp(processedBlocks);
 
       editor.replaceBlocks(editor.document, processedBlocks.length === 0 ? [{ type: "paragraph", content: [] }] : processedBlocks); 
       setInitialAssetUrls(getAllAssetUrls(processedBlocks));
@@ -905,7 +1102,7 @@ function App() {
 
   // 🔥 目录点击跳转逻辑
   const jumpToBlock = (id: string) => {
-     const element = document.querySelector(`[data-block-id="${id}"]`);
+     const element = document.querySelector(`[data-id="${id}"]`);
      if (element) {
          element.scrollIntoView({ behavior: "smooth", block: "center" });
      }
@@ -919,6 +1116,7 @@ function App() {
         [data-content-type="codeBlock"] { background: transparent !important; box-shadow: none !important; }
         pre, code, [class*="language-"] { background: transparent !important; background-color: transparent !important; text-shadow: none !important; }
         .bn-block-content { max-width: 100% !important; }
+        .bn-block-content[data-content-type="numberedListItem"]::before, .bn-block-content[data-content-type="bulletListItem"]::before { user-select: none !important; }
 
         @media print {
           .no-print, .bn-side-menu, .bn-formatting-toolbar, button, .export-exclude { display: none !important; }
@@ -1088,15 +1286,41 @@ function App() {
                             }, 
                             aliases: ["code", "c", "js", "ts"], group: "Basic", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>{`</>`}</div>, subtext: "插入代码块" 
                         }; 
-                        const mermaidItem = { 
-                            title: "流程图 (Mermaid)", 
-                            onItemClick: () => { 
-                                const mermaidBlock = { type: "mermaid" as const, props: { code: "graph TD;\nA-->B;" } }; 
+                        const mermaidItem = {
+                            title: "流程图 (Mermaid)",
+                            onItemClick: () => {
+                                const mermaidBlock = { type: "mermaid" as const, props: { code: "graph TD;\nA-->B;" } };
                                 insertOrReplaceBlock(editor, mermaidBlock);
-                            }, 
-                            aliases: ["flowchart", "mindmap", "graph", "mermaid"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>🧜‍♂️</div>, subtext: "插入思维导图/流程图" 
+                            },
+                            aliases: ["flowchart", "mindmap", "graph", "mermaid"], group: "Media", icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>🧜‍♂️</div>, subtext: "插入思维导图/流程图"
                         };
-                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem], query); 
+                        const customNumberedList = {
+                            title: "自定义编号列表",
+                            onItemClick: async () => {
+                                const startStr = await showDialog('prompt', '自定义起始编号', { message: '请输入列表的起始数字：', defaultValue: '1' });
+                                if (!startStr) return;
+                                const startNum = parseInt(startStr);
+                                if (isNaN(startNum) || startNum < 1) return;
+                                const currentPos = editor.getTextCursorPosition();
+                                const currentBlock = currentPos.block;
+                                const listItem = { type: "numberedListItem" as const, props: { start: startNum }, content: [] };
+                                // If cursor is in a list, insert empty paragraph first to break list grouping
+                                const needSeparator = currentBlock.type === 'numberedListItem' || currentBlock.type === 'bulletListItem';
+                                const blocks = needSeparator
+                                    ? [{ type: "paragraph" as const, content: [] }, listItem]
+                                    : [listItem];
+                                const isEmpty = Array.isArray(currentBlock.content) && currentBlock.content.length === 0;
+                                if (isEmpty) {
+                                    editor.replaceBlocks([currentBlock], blocks);
+                                } else {
+                                    editor.insertBlocks(blocks, currentBlock, "after");
+                                }
+                            },
+                            aliases: ["numbered", "customlist", "startnumber", "bh"], group: "Basic",
+                            icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>1️⃣</div>,
+                            subtext: "从指定数字开始的编号列表"
+                        };
+                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem, customNumberedList], query); 
                     }} />
                  </BlockNoteView>
               ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}

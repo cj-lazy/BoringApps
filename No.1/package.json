@@ -1,7 +1,7 @@
 {
   "name": "boringapps_no.1",
   "private": true,
-  "version": "3.0.1",
+  "version": "3.1.0",
   "type": "module",
   "scripts": {
     "version-sync": "node sync-version.cjs",
@@ -20,7 +20,9 @@
     "@tauri-apps/plugin-opener": "^2",
     "html-docx-js-typescript": "^0.1.5",
     "katex": "^0.16.28",
+    "mammoth": "^1.12.0",
     "mermaid": "^11.12.2",
+    "pdfjs-dist": "^6.0.227",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-syntax-highlighter": "^16.1.0"
