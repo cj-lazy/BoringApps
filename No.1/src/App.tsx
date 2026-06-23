@@ -64,6 +64,12 @@ function App() {
   const [ctxMenu, setCtxMenu] = useState<{x:number;y:number;node:FileNode}|null>(null);
   const [isReadMode, setIsReadMode] = useState(false);
   const [isFocusMode, setIsFocusMode] = useState(false);
+  const [isSplitMode, setIsSplitMode] = useState(false);
+  const [rightFile, setRightFile] = useState<string | null>(null);
+  const rightFileRef = useRef<string | null>(null);
+  useEffect(() => { rightFileRef.current = rightFile; }, [rightFile]);
+  const [rightAssetUrls, setRightAssetUrls] = useState<Set<string>>(new Set());
+  const [splitRatio, setSplitRatio] = useState(0.5);
 
   const isLoadingRef = useRef(false);
   const isExitingRef = useRef(false);
@@ -146,20 +152,70 @@ function App() {
 
   };
 
-  const editor = useCreateBlockNote({ 
-      schema, 
-      uploadFile,
-  });
+  const editor = useCreateBlockNote({ schema, uploadFile });
+  const uploadFile2 = async (file: File) => {
+    if (!rightFileRef.current) { addToast('请先在右侧打开一个笔记', 'info'); return ""; }
+    try {
+      setStatus("上传中...");
+      const filename = `${new Date().getTime()}_${file.name}`;
+      const payload = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const path = await invoke<string>("save_image", { fileName: filename, payload, notePath: rightFileRef.current });
+      const assetUrl = convertFileSrc(path);
+      setRightAssetUrls(prev => new Set([...prev, assetUrl]));
+      return assetUrl;
+    } catch (e) { addToast("上传失败: "+e, 'error'); return ""; }
+  };
+  const editor2 = useCreateBlockNote({ schema, uploadFile: uploadFile2 });
 
   const refreshTree = async () => { try { const tree = await invoke<FileNode[]>("get_file_tree"); setFileTree(tree); } catch (e) { console.error(e); } };
 
   const toggleFolder = (path: string) => { const newSet = new Set(expandedFolders); if (newSet.has(path)) newSet.delete(path); else newSet.add(path); setExpandedFolders(newSet); };
   
-  const handleSelect = (node: FileNode) => { 
-    if (node.is_dir) { toggleFolder(node.path); setSelectedFolder(node.path); } 
-    else { loadNote(node.path); const parentPath = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : null; setSelectedFolder(parentPath); } 
+  const handleSelect = (node: FileNode, e?: React.MouseEvent) => {
+    if (node.is_dir) { toggleFolder(node.path); setSelectedFolder(node.path); }
+    else {
+      if (isSplitMode && e?.ctrlKey) { loadRightNote(node.path); }
+      else { loadNote(node.path); const parentPath = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : null; setSelectedFolder(parentPath); }
+    }
   };
   
+  const saveRightNote = async () => {
+    const fileToSave = rightFileRef.current;
+    if (!fileToSave) return;
+    try {
+      const currentBlocks = editor2.document;
+      const currentAssetUrls = getAllAssetUrls(currentBlocks);
+      const deletedUrls = Array.from(rightAssetUrls).filter(url => !currentAssetUrls.has(url));
+      for (const url of deletedUrls) { try { await invoke("delete_asset", { url }); } catch (err) { console.error(err); } }
+      let finalMarkdown = "";
+      let standardBlockBuffer: typeof currentBlocks = [];
+      for (const block of currentBlocks) {
+        if (block.type === "latex") {
+          if (standardBlockBuffer.length > 0) { finalMarkdown += await editor2.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
+          let decodedLatex = ""; try { decodedLatex = decodeURIComponent(block.props.text); } catch { decodedLatex = block.props.text; }
+          finalMarkdown += `\n$$\n${decodedLatex}\n$$\n`;
+        } else if (block.type === "codeBlock") {
+          if (standardBlockBuffer.length > 0) { finalMarkdown += await editor2.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
+          let textToSave = ""; try { textToSave = decodeURIComponent(block.props.text); } catch { textToSave = block.props.text; }
+          finalMarkdown += `\n\`\`\`${block.props.language}|w=${block.props.width}|h=${block.props.height}\n${textToSave}\n\`\`\`\n`;
+        } else if (block.type === "mermaid") {
+          if (standardBlockBuffer.length > 0) { finalMarkdown += await editor2.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
+          finalMarkdown += `\n\`\`\`mermaid|w=${block.props.width}|h=${block.props.height}\n${block.props.code}\n\`\`\`\n`;
+        } else if (block.type === "file") {
+          if (standardBlockBuffer.length > 0) { finalMarkdown += await editor2.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
+          finalMarkdown += `\n[FILE:${block.props.name}](${block.props.url})\n`;
+        } else if (block.type === "image") {
+          if (standardBlockBuffer.length > 0) { finalMarkdown += await editor2.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer)); standardBlockBuffer = []; }
+          const width = block.props.width || 500; const safeName = (block.props.name||"image").replace(/\|/g, "_");
+          finalMarkdown += `\n![${safeName}|w=${width}](${block.props.url})\n`;
+        } else { standardBlockBuffer.push(block); }
+      }
+      if (standardBlockBuffer.length > 0) finalMarkdown += await editor2.blocksToMarkdownLossy(encodeSpacesInBlocks(standardBlockBuffer));
+      await invoke("save_note", { path: fileToSave, content: finalMarkdown });
+      setRightAssetUrls(currentAssetUrls);
+    } catch(e) { console.error(e); }
+  };
+
   const handleBackgroundClick = (e: React.MouseEvent) => { if (e.target === e.currentTarget) setSelectedFolder(null); };
 
   const saveCurrentNote = async () => {
@@ -329,7 +385,7 @@ function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key === 's') { e.preventDefault(); saveCurrentNote(); }
+      if (mod && e.key === 's') { e.preventDefault(); saveCurrentNote(); if (isSplitMode && rightFile) saveRightNote(); }
       else if (mod && e.key === 'k') { e.preventDefault(); setIsSidebarOpen(true); setTimeout(() => sidebarSearchRef.current?.focus(), 100); }
       else if (mod && e.shiftKey && e.key === 'F') { e.preventDefault(); setSearchOpen(true); setSearchQuery(""); setSearchResults([]); }
       else if (mod && e.key === 'f' && !e.shiftKey) {
@@ -346,6 +402,33 @@ function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editor, initialAssetUrls]);
+  const loadRightNote = async (path: string) => {
+    setStatus(`加载右侧 ${path}...`);
+    try {
+      let content = await invoke<string>("load_note", { path });
+      // Same parsing logic as loadNote but for editor2
+      const codeBlockMap = new Map(); let blockIdCounter = 0;
+      content = content.replace(/```(\S*?)(?:\|w=(\d+\|100%)?\|h=(\d+)?)?\s*\n([\s\S]*?)```/g, (_m:any,l:any,w:any,h:any,c:any) => { const id=`@@CB${blockIdCounter++}@@`; const lang=l||"text"; codeBlockMap.set(id,{kind:lang==="mermaid"?"mermaid":"code",lang,code:c.trim(),width:w?parseInt(w):500,height:h?parseInt(h):300}); return id; });
+      content = content.replace(/\$\$\n([\s\S]*?)\n\$\$/g, (_m:any,f:any) => { const id=`@@LX${blockIdCounter++}@@`; codeBlockMap.set(id,{kind:"latex",code:f.trim()}); return id; });
+      content = content.replace(/!\[(.*?)\]\((.*?)\)/g, (_m:any,alt:any,url:any) => { let w=500,n=alt; if(alt.includes("|w=")){const p=alt.split("|w=");n=p[0];w=parseInt(p[1])||500;} const id=`@@IMG${blockIdCounter++}@@`; codeBlockMap.set(id,{kind:"image",name:n,url,width:w}); return id; });
+      content = content.replace(/\[FILE:(.*?)\]\((.*?)\)/g, (_m:any,name:any,url:any) => { const id=`@@FL${blockIdCounter++}@@`; codeBlockMap.set(id,{kind:"file",name,url}); return id; });
+      const rawBlocks = await editor2.tryParseMarkdownToBlocks(content);
+      const processedBlocks = rawBlocks.map((block:any) => {
+        if(block.type==="paragraph"&&block.content&&block.content.length===1&&block.content[0].text){
+          const t=block.content[0].text.trim();if(codeBlockMap.has(t)){const d=codeBlockMap.get(t);
+          if(d.kind==="latex")return{type:"latex",props:{text:encodeURIComponent(d.code)},content:[]};
+          if(d.kind==="code")return{type:"codeBlock",props:{text:encodeURIComponent(d.code),language:d.lang,width:d.width,height:d.height},content:[]};
+          if(d.kind==="mermaid")return{type:"mermaid",props:{code:d.code,width:d.width,height:d.height},content:[]};
+          if(d.kind==="file")return{type:"file",props:{name:d.name,url:d.url},content:[]};
+          if(d.kind==="image")return{type:"image",props:{url:d.url,name:d.name,width:d.width},content:[]};}
+        }return block;});
+      const cleanNbsp = (blocks:any[])=>{for(const b of blocks){if(b.type==='paragraph'&&Array.isArray(b.content)&&b.content.length===1&&b.content[0].text===' '){b.content=[];}if(b.children)cleanNbsp(b.children);}};
+      cleanNbsp(processedBlocks);
+      editor2.replaceBlocks(editor2.document, processedBlocks.length===0?[{type:"paragraph",content:[]}]:processedBlocks);
+      setRightAssetUrls(getAllAssetUrls(processedBlocks));
+      setRightFile(path);
+    } catch(e) { console.error(e); }
+  };
   const silentGC = async () => { try { await invoke("gc_unused_assets"); } catch (e) { console.warn(e); } };
   useEffect(() => { refreshTree(); silentGC(); }, []);
 
@@ -430,7 +513,7 @@ function App() {
     const isFav = favPaths.has(node.path);
     return (
       <div key={node.path} onContextMenu={(e) => showNodeMenu(e, node)}>
-        <div onClick={() => handleSelect(node)}
+        <div onClick={(e) => handleSelect(node, e)}
           style={{ padding: "5px 8px", paddingLeft: `${depth*14+8}px`, cursor:"pointer",
             background: currentFile===node.path?"#e6f7ff":(isSelected&&node.is_dir?"#f0f0f0":"transparent"),
             color: currentFile===node.path?"#1890ff":"#333", display:"flex", justifyContent:"space-between",
@@ -798,8 +881,18 @@ function App() {
         <div style={{ padding: "0 10px 10px 10px", borderBottom: "1px solid rgba(0,0,0,0.05)" }}><input ref={sidebarSearchRef} type="text" placeholder="🔍 搜索... (Ctrl+K)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    const flat = filterNodes(fileTree, searchTerm).flatMap(n => n.is_dir ? [] : [n.path]);
-                    if (flat.length >= 1) loadNote(flat[0]);
+                    const collectFiles = (ns: FileNode[]): string[] => {
+                      let paths: string[] = [];
+                      for (const n of ns) {
+                        if (!n.is_dir) paths.push(n.path);
+                        if (n.children) paths = paths.concat(collectFiles(n.children));
+                      }
+                      return paths;
+                    };
+                    const allFiles = collectFiles(fileTree);
+                    const q = searchTerm.toLowerCase();
+                    const match = allFiles.find(p => p.toLowerCase().includes(q));
+                    if (match) loadNote(match);
                   }
                 }}
                 style={{ width: "100%", padding: "6px 8px", borderRadius: "4px", border: "1px solid #ddd", fontSize: "12px", boxSizing: "border-box", background: "rgba(255,255,255,0.8)" }} /></div>
@@ -833,7 +926,12 @@ function App() {
         
         {/* Tab 栏 */}
         {!isFocusMode && tabs.length > 0 && (
-          <div className="no-print" style={{ display: "flex", background: "#f8f9fa", borderBottom: "1px solid #e8eaed", overflowX: "auto", flexShrink: 0, padding: "0 4px" }}>
+          <div className="no-print" style={{ display: "flex", background: "#f8f9fa", borderBottom: "1px solid #e8eaed", flexShrink: 0, alignItems: "center" }}>
+            <button onClick={() => { const el = document.getElementById('tab-scroll'); if (el) el.scrollBy({left: -200, behavior: 'smooth'}); }}
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "11px", color: "#999", padding: "4px 6px", flexShrink: 0 }}
+              onMouseEnter={(e) => e.currentTarget.style.color = "#333"}
+              onMouseLeave={(e) => e.currentTarget.style.color = "#999"}>◀</button>
+            <div id="tab-scroll" style={{ display: "flex", overflowX: "auto", flex: 1, scrollbarWidth: "none" }}>
             {tabs.map((tab, i) => (
               <div key={tab.path} onClick={() => { if (i !== activeTabIndex) loadNote(tab.path); }}
                 style={{
@@ -858,91 +956,108 @@ function App() {
                   title="关闭">✕</span>
               </div>
             ))}
+            </div>
+            <button onClick={() => { const el = document.getElementById('tab-scroll'); if (el) el.scrollBy({left: 200, behavior: 'smooth'}); }}
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "11px", color: "#999", padding: "4px 6px", flexShrink: 0 }}
+              onMouseEnter={(e) => e.currentTarget.style.color = "#333"}
+              onMouseLeave={(e) => e.currentTarget.style.color = "#999"}>▶</button>
           </div>
         )}
 
         {/* 顶部栏 */}
-        {!isFocusMode && <div className="no-print" style={{ padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
-          <div style={{display: 'flex', alignItems: 'center'}}>
+        {!isFocusMode && <div className="no-print" style={{ padding: "8px 16px", borderBottom: "1px solid #e8eaed", display: "flex", justifyContent: "space-between", alignItems: "center", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)`, minHeight: "40px" }}>
+          {/* 左侧：导航/视图按钮 */}
+          <div style={{display: 'flex', alignItems: 'center', gap: "4px"}}>
             <button onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              style={{ border: "none", background: "transparent", cursor: "pointer", marginRight: "8px", fontSize: "14px", color: "#888", width: "28px", height: "28px", borderRadius: "6px", display: "flex", alignItems: "center", justifyContent: "center" }}
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "13px", color: "#888", width: "28px", height: "28px", borderRadius: "6px", display: "flex", alignItems: "center", justifyContent: "center" }}
               onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
               onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
             >{isSidebarOpen ? "◀" : "▶"}</button>
-            {/* 目录切换按钮 */}
             {currentFile && (
-                <button
-                    onClick={() => setIsTocOpen(!isTocOpen)}
-                    title={isTocOpen ? "收起大纲" : "展开大纲"}
-                    style={{
-                        border: "1px solid #e0e0e0",
-                        background: isTocOpen ? "#e6f7ff" : "white",
-                        color: isTocOpen ? "#1890ff" : "#888",
-                        cursor: "pointer", borderRadius: "6px", padding: "3px 10px",
-                        fontSize: "12px", display: "flex", alignItems: "center", gap: "5px",
-                        marginRight: "8px", transition: "all 0.15s"
-                    }}
-                >
-                    <span>{isTocOpen ? "📖" : "📘"}</span>
-                    <span>大纲</span>
+                <button onClick={() => setIsTocOpen(!isTocOpen)} title={isTocOpen ? "收起大纲" : "展开大纲"}
+                    style={{ border: "1px solid transparent", background: isTocOpen ? "#e6f7ff" : "transparent", color: isTocOpen ? "#1677ff" : "#888",
+                        cursor: "pointer", borderRadius: "6px", padding: "3px 8px", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px", transition: "all 0.15s" }}>
+                    <span>{isTocOpen ? "📖" : "📘"}</span><span>大纲</span>
                 </button>
             )}
-            {/* 全局搜索按钮 */}
             <button onClick={() => { setSearchOpen(true); setSearchQuery(""); setSearchResults([]); }}
               title="全局搜索替换 (Ctrl+Shift+F)"
-              style={{ border: "1px solid #e0e0e0", background: "white", cursor: "pointer", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", color: "#888", display: "flex", alignItems: "center", gap: "5px", marginRight: "8px", transition: "all 0.15s" }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#1890ff"; e.currentTarget.style.color = "#1890ff"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#e0e0e0"; e.currentTarget.style.color = "#888"; }}>
+              style={{ border: "1px solid transparent", background: "transparent", cursor: "pointer", borderRadius: "6px", padding: "3px 8px", fontSize: "12px", color: "#888", display: "flex", alignItems: "center", gap: "4px", transition: "all 0.15s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "#f0f0f0"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
               <span>🔎</span><span>搜索替换</span>
             </button>
-            {/* 阅读模式 */}
+          </div>
+
+          {/* 中间：信息 */}
+          <div style={{display: 'flex', alignItems: 'center', gap: "16px"}}>
             {currentFile && (
-              <button onClick={() => setIsReadMode(!isReadMode)} title={isReadMode ? "编辑模式" : "阅读模式"}
-                style={{ border: "1px solid #e0e0e0", background: isReadMode ? "#e6f7ff" : "white", cursor: "pointer", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", color: isReadMode ? "#1677ff" : "#888", display: "flex", alignItems: "center", gap: "5px", marginRight: "8px", transition: "all 0.15s" }}>
-                <span>{isReadMode ? "✏️" : "📖"}</span>
-              </button>
-            )}
-            {/* 聚焦模式 */}
-            {currentFile && (
-              <button onClick={() => setIsFocusMode(!isFocusMode)} title="聚焦模式 (Ctrl+Shift+D)"
-                style={{ border: "1px solid #e0e0e0", background: isFocusMode ? "#e6f7ff" : "white", cursor: "pointer", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", color: isFocusMode ? "#1677ff" : "#888", display: "flex", alignItems: "center", gap: "5px", marginRight: "8px", transition: "all 0.15s" }}>
-                <span>⛶</span>
-              </button>
-            )}
-            {currentFile && (
-                <span style={{ fontSize: "12px", color: "#999", transition: "opacity 0.3s" }}>
-                    {lastSaveTime ? `上次保存: ${lastSaveTime}` : ""}
+                <span style={{ fontSize: "12px", color: "#bbb", display: "flex", gap: "14px", userSelect: "none" }}>
+                    <span>{lastSaveTime ? `💾 ${lastSaveTime}` : ""}</span>
+                    <span>📝 {(() => { let c=0; editor.document.forEach((b:any)=>{const t=b.content?.map((c:any)=>c.text||'').join('')||''; c+=t.length;}); return c; })()} 字</span>
                 </span>
             )}
+            {!currentFile && <span style={{ fontSize: "12px", color: "#ccc" }}>选择或新建笔记开始编辑</span>}
           </div>
-          
-          <div style={{ display:"flex", alignItems:"center", gap:"6px" }}>
-            <button onClick={() => editor.undo()} title="撤销 (Ctrl+Z)"
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "14px", color: "#888", padding: "2px 4px", borderRadius: "4px" }}
-              onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
-              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>↩</button>
-            <button onClick={() => editor.redo()} title="重做 (Ctrl+Shift+Z)"
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "14px", color: "#888", padding: "2px 4px", borderRadius: "4px", marginRight: "4px" }}
-              onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
-              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>↪</button>
-            <span style={{ fontSize: "12px", color: (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) ? "#faad14" : "#888", fontWeight: (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) ? "bold" : "normal" }}>{status}</span>
-            {currentFile && (
-              <div style={{ display: 'flex', gap: '5px', marginRight: '10px' }}>
-                <button onClick={handleExportWord} title="导出为 Word" style={{ padding: "4px 8px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px" }}><span>📝</span> Word</button>
-                <button onClick={handleExportPdf} title="导出为 PDF" style={{ padding: "4px 8px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px" }}><span>🖨️</span> PDF</button>
-              </div>
-            )}
-            <button onClick={saveCurrentNote} title="保存 (Ctrl+S)" style={{ padding: "4px 10px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center" }}>💾 保存</button>
+
+          {/* 右侧：编辑操作 */}
+          <div style={{ display:"flex", alignItems:"center", gap:"4px" }}>
+            <span style={{ fontSize: "12px", color: (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) ? "#faad14" : "#bbb", fontWeight: (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) ? "bold" : "normal", marginRight: "4px" }}>{status === "就绪" || status === "已加载" || status === "已保存" ? "" : status}</span>
+            {currentFile && <>
+              <button onClick={() => editor.undo()} title="撤销 (Ctrl+Z)"
+                style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "14px", color: "#999", padding: "2px 4px", borderRadius: "4px" }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>↩</button>
+              <button onClick={() => editor.redo()} title="重做 (Ctrl+Shift+Z)"
+                style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "14px", color: "#999", padding: "2px 4px", borderRadius: "4px" }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>↪</button>
+              <button onClick={() => setIsReadMode(!isReadMode)} title={isReadMode ? "编辑模式" : "阅读模式"}
+                style={{ border: "1px solid transparent", background: isReadMode ? "#e6f7ff" : "transparent", cursor: "pointer", borderRadius: "6px", padding: "3px 8px", fontSize: "12px", color: isReadMode ? "#1677ff" : "#888", transition: "all 0.15s" }}
+                onMouseEnter={(e) => { if (!isReadMode) e.currentTarget.style.background = "#f0f0f0"; }}
+                onMouseLeave={(e) => { if (!isReadMode) e.currentTarget.style.background = "transparent"; }}>
+                <span>{isReadMode ? "✏️" : "📖"}</span>
+              </button>
+              <button onClick={() => { setIsSplitMode(!isSplitMode); if (!isSplitMode) setRightFile(null); }}
+                title={isSplitMode ? "退出双栏编辑" : "双栏编辑"}
+                style={{ border: "1px solid transparent", background: isSplitMode ? "#e6f7ff" : "transparent", cursor: "pointer", borderRadius: "6px", padding: "3px 8px", fontSize: "12px", color: isSplitMode ? "#1677ff" : "#888", transition: "all 0.15s" }}
+                onMouseEnter={(e) => { if (!isSplitMode) e.currentTarget.style.background = "#f0f0f0"; }}
+                onMouseLeave={(e) => { if (!isSplitMode) e.currentTarget.style.background = "transparent"; }}>
+                <span>🗖</span>
+              </button>
+              <button onClick={() => setIsFocusMode(!isFocusMode)} title="纯净模式 (Ctrl+Shift+D)"
+                style={{ border: "1px solid transparent", background: isFocusMode ? "#e6f7ff" : "transparent", cursor: "pointer", borderRadius: "6px", padding: "3px 8px", fontSize: "12px", color: isFocusMode ? "#1677ff" : "#888", transition: "all 0.15s" }}
+                onMouseEnter={(e) => { if (!isFocusMode) e.currentTarget.style.background = "#f0f0f0"; }}
+                onMouseLeave={(e) => { if (!isFocusMode) e.currentTarget.style.background = "transparent"; }}>
+                <span>⛶</span>
+              </button>
+              <span style={{ width: "1px", height: "18px", background: "#e0e0e0", margin: "0 2px" }} />
+              <button onClick={saveCurrentNote} title="保存 (Ctrl+S)"
+                style={{ padding: "4px 12px", border: "1px solid #1677ff", background: "#1677ff", color: "white", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: 500, transition: "all 0.15s" }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#4096ff"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "#1677ff"}>💾 保存</button>
+              {!isSplitMode && <>
+                <button onClick={handleExportWord} title="导出为 Word"
+                  style={{ padding: "4px 8px", border: "1px solid #e0e0e0", background: "white", borderRadius: "6px", cursor: "pointer", fontSize: "12px", color: "#888", transition: "all 0.15s" }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#1677ff"; e.currentTarget.style.color = "#1677ff"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#e0e0e0"; e.currentTarget.style.color = "#888"; }}>📝 Word</button>
+                <button onClick={handleExportPdf} title="导出为 PDF"
+                  style={{ padding: "4px 8px", border: "1px solid #e0e0e0", background: "white", borderRadius: "6px", cursor: "pointer", fontSize: "12px", color: "#888", transition: "all 0.15s" }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#1677ff"; e.currentTarget.style.color = "#1677ff"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#e0e0e0"; e.currentTarget.style.color = "#888"; }}>🖨️ PDF</button>
+              </>}
+            </>}
           </div>
         </div>}
 
-        {/* 聚焦模式浮动退出按钮 */}
+        {/* 纯净模式顶栏 */}
         {isFocusMode && (
-          <div className="no-print" style={{ position: "absolute", top: "12px", right: "16px", zIndex: 100, display: "flex", gap: "6px" }}>
-            <button onClick={() => setIsFocusMode(false)} title="退出聚焦 (Ctrl+Shift+D)"
-              style={{ padding: "6px 12px", background: "rgba(0,0,0,0.06)", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "13px", color: "#666", backdropFilter: "blur(8px)" }}
-              onMouseEnter={(e) => e.currentTarget.style.background = "rgba(0,0,0,0.1)"}
-              onMouseLeave={(e) => e.currentTarget.style.background = "rgba(0,0,0,0.06)"}>✕ 退出聚焦</button>
+          <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 16px", background: "rgba(255,255,255,0.95)", borderBottom: "1px solid #eee", backdropFilter: "blur(8px)", flexShrink: 0 }}>
+            <span style={{ fontSize: "12px", color: "#999" }}>纯净模式 · Ctrl+Shift+D 退出</span>
+            <button onClick={() => setIsFocusMode(false)}
+              style={{ padding: "4px 12px", background: "#f0f0f0", border: "1px solid #e0e0e0", borderRadius: "6px", cursor: "pointer", fontSize: "12px", color: "#666" }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "#e0e0e0"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "#f0f0f0"; }}>✕ 退出纯净</button>
           </div>
         )}
 
@@ -991,14 +1106,21 @@ function App() {
                 )}
             </div>
 
-            {/* 编辑器滚动区域 */}
-            <div style={{
-                flex: 1,
-                overflow: "auto",
-                padding: "40px 60px",
-                paddingBottom: "50vh",
+            {/* 编辑器区域 */}
+            <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+            {/* 左侧编辑器 */}
+            <div style={{ display: "flex", flexDirection: "column", flex: isSplitMode ? `${splitRatio*100}%` : 1, minWidth: 0 }}>
+              {isSplitMode && currentFile && (
+                <div className="no-print" style={{ padding: "4px 12px", fontSize: "11px", color: "#1677ff", fontWeight: 600, background: "#f0f5ff", borderBottom: "1px solid #d6e4ff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>
+                  📄 {currentFile.split("/").pop()}
+                </div>
+              )}
+              <div style={{
+                flex: 1, overflow: "auto",
+                padding: isSplitMode ? "16px 24px" : "40px 60px",
+                paddingBottom: isSplitMode ? "30vh" : "50vh",
                 transition: "padding 0.3s ease"
-            }} onBlur={() => { if (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) saveCurrentNote(); }}>
+              }} onBlur={() => { if (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) saveCurrentNote(); }}>
               {/* Inline search bar (Ctrl+F) */}
               {inlineSearch.open && (
                 <div className="no-print" style={{ marginBottom: "12px", display: "flex", gap: "8px", alignItems: "center", padding: "8px 12px", background: "#fafbfc", borderRadius: "8px", border: "1px solid #e0e0e0" }}>
@@ -1112,16 +1234,61 @@ function App() {
                  </BlockNoteView>
               ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}
             </div>
+            </div>
+
+            {/* 分屏分割线 + 右侧编辑器 */}
+            {isSplitMode && <>
+              <div onMouseDown={(e) => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const startRatio = splitRatio;
+                const container = e.currentTarget.parentElement;
+                const onMove = (ev: MouseEvent) => {
+                  if (!container) return;
+                  const w = container.offsetWidth;
+                  const newRatio = Math.max(0.2, Math.min(0.8, startRatio + (ev.clientX - startX) / w));
+                  setSplitRatio(newRatio);
+                };
+                const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('mouseup', onUp);
+              }}
+                style={{ width: "4px", cursor: "col-resize", background: "#e8eaed", flexShrink: 0, transition: "background 0.15s" }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#1677ff"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "#e8eaed"} />
+              <div style={{ display: "flex", flexDirection: "column", flex: `${(1-splitRatio)*100}%`, minWidth: 0 }}>
+                {rightFile && (
+                  <div className="no-print" style={{ padding: "4px 12px", fontSize: "11px", color: "#1677ff", fontWeight: 600, background: "#f0f5ff", borderBottom: "1px solid #d6e4ff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>
+                    📄 {rightFile.split("/").pop()}
+                  </div>
+                )}
+                <div style={{
+                  flex: 1, overflow: "auto",
+                  padding: "16px 24px",
+                  paddingBottom: "30vh"
+                }} onBlur={() => saveRightNote()}>
+                {rightFile ? (
+                  <BlockNoteView key={'r'+rightFile} editor={editor2} theme="light" slashMenu={false} editable={!isReadMode} />
+                ) : (
+                  <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#999", gap: "12px" }}>
+                    <div style={{ fontSize: "32px" }}>📄</div>
+                    <div style={{ fontSize: "14px" }}>Ctrl+点击侧边栏笔记，在右侧打开</div>
+                    <div style={{ fontSize: "12px", color: "#ccc" }}>或右键菜单选择「在右侧打开」</div>
+                  </div>
+                )}
+                </div>
+              </div>
+            </>}
+          </div>
         </div>
       </div>
-
-      {/* Context menu */}
       {ctxMenu && (
         <div style={{ position: "fixed", left: ctxMenu.x, top: ctxMenu.y, zIndex: 2147483646, background: "white", borderRadius: "8px", boxShadow: "0 8px 24px rgba(0,0,0,0.15)", border: "1px solid #f0f0f0", minWidth: "160px", padding: "4px" }}
           onClick={(e) => e.stopPropagation()}>
           {!ctxMenu.node.is_dir && [
             { label: "📋 详细信息", action: () => handleShowInfo(ctxMenu.node) },
             { label: "⭐ " + (favPaths.has(ctxMenu.node.path)?"取消收藏":"收藏"), action: () => toggleFav(ctxMenu.node.path) },
+            ...(isSplitMode ? [{ label: "📂 在右侧打开", action: () => { loadRightNote(ctxMenu.node.path); setCtxMenu(null); } }] : []),
           ].map(item => (
             <div key={item.label} onClick={item.action}
               style={{ padding: "8px 12px", fontSize: "13px", cursor: "pointer", borderRadius: "4px", color: "#333" }}
@@ -1166,10 +1333,9 @@ function App() {
               ["Ctrl+K", "聚焦侧边栏搜索"],
               ["Ctrl+F", "笔记内搜索定位"],
               ["Ctrl+Shift+F", "全局搜索替换"],
-              ["Ctrl+Shift+D", "聚焦模式"],
-              ["Ctrl+Z", "撤销 / Ctrl+Shift+Z 重做"],
-              ["[[", "Wiki 链接（插入笔记引用）"],
-              ["Esc", "关闭当前面板"],
+              ["Ctrl+Shift+D", "纯净模式"],
+              ["Ctrl+Z / Ctrl+Shift+Z", "撤销 / 重做"],
+              ["Esc", "关闭当前面板 / 弹窗"],
               ["?", "显示此快捷键面板"],
             ].map(([key, desc]) => (
               <div key={key} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #f5f5f5", fontSize: "13px" }}>
