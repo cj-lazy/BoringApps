@@ -123,12 +123,19 @@ fn scan_dir(base_dir: &Path, rel_path: &Path) -> Vec<FileNode> {
     let full_path = base_dir.join(rel_path);
     let mut nodes = Vec::new();
 
+    // Read order file if exists
+    let order_path = full_path.join(".order.json");
+    let order: Vec<String> = fs::read_to_string(&order_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
     if let Ok(entries) = fs::read_dir(&full_path) {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-            if name == "assets" || name == ".trash" || name.starts_with('.') {
+            if name == "assets" || name == ".trash" || name == ".order.json" || name.starts_with('.') {
                 continue;
             }
 
@@ -164,7 +171,14 @@ fn scan_dir(base_dir: &Path, rel_path: &Path) -> Vec<FileNode> {
             });
         }
     }
-    nodes.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+
+    // Sort by order file (items not in order go to end, sorted by name), dirs first
+    let get_order_idx = |name: &str| order.iter().position(|o| o == name).unwrap_or(usize::MAX);
+    nodes.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir)
+            .then(get_order_idx(&a.name).cmp(&get_order_idx(&b.name)))
+            .then(a.name.cmp(&b.name))
+    });
     nodes
 }
 
@@ -400,6 +414,86 @@ fn restore_trash_item(file_name: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize, Clone)]
+struct SearchMatch {
+    path: String,
+    line: usize,
+    content: String,
+}
+
+#[tauri::command]
+fn search_notes(query: String) -> Result<Vec<SearchMatch>, String> {
+    let data_dir = get_data_dir();
+    let query_lower = query.to_lowercase();
+    let mut results: Vec<SearchMatch> = Vec::new();
+
+    fn search_dir(dir: &Path, query_lower: &str, results: &mut Vec<SearchMatch>, data_dir: &Path) {
+        if results.len() >= 100 { return; }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if results.len() >= 100 { return; }
+                let path = entry.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name == "assets" || name == ".trash" || name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    search_dir(&path, query_lower, results, data_dir);
+                } else if name.ends_with(".md") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        for (i, line) in content.lines().enumerate() {
+                            if line.to_lowercase().contains(query_lower) {
+                                let rel = path.strip_prefix(data_dir).unwrap_or(&path);
+                                let frontend_path = rel.with_extension("").to_string_lossy().to_string().replace("\\", "/");
+                                results.push(SearchMatch {
+                                    path: frontend_path,
+                                    line: i + 1,
+                                    content: line.to_string(),
+                                });
+                                if results.len() >= 100 { return; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    search_dir(&data_dir, &query_lower, &mut results, &data_dir);
+    Ok(results)
+}
+
+#[derive(Serialize)]
+struct NoteInfo {
+    path: String,
+    size: u64,
+    lines: usize,
+    created: String,
+    modified: String,
+}
+
+#[tauri::command]
+fn get_note_info(path: String) -> Result<NoteInfo, String> {
+    let p = get_data_dir().join(format!("{}.md", path));
+    if !p.exists() { return Err("文件不存在".into()); }
+    let meta = p.metadata().map_err(|e| e.to_string())?;
+    let content = fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    let lines = content.lines().count();
+    let fmt = |t: std::time::SystemTime| -> String {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let dt = secs / 86400;
+        let time = secs % 86400;
+        let h = time / 3600;
+        let m = (time % 3600) / 60;
+        format!("day{} {:02}:{:02}", dt, h, m)
+    };
+    Ok(NoteInfo {
+        path,
+        size: meta.len(),
+        lines,
+        created: fmt(meta.created().unwrap_or(std::time::SystemTime::now())),
+        modified: fmt(meta.modified().unwrap_or(std::time::SystemTime::now())),
+    })
+}
+
 #[cfg_attr(mobile, mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -420,7 +514,9 @@ pub fn run() {
             get_trash_items,
             empty_trash,
             delete_trash_item,
-            restore_trash_item
+            restore_trash_item,
+            search_notes,
+            get_note_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

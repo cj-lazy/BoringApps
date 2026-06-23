@@ -6,602 +6,20 @@ import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import mammoth from "mammoth";
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
-import katex from "katex";
-import "katex/dist/katex.min.css"; 
-import { BlockNoteSchema, defaultBlockSpecs, defaultProps } from "@blocknote/core";
-import { createReactBlockSpec, getDefaultReactSlashMenuItems, SuggestionMenuController } from "@blocknote/react";
+import "katex/dist/katex.min.css";
+import { getDefaultReactSlashMenuItems, SuggestionMenuController } from "@blocknote/react";
 
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { asBlob } from "html-docx-js-typescript";
 
-// 🔥🔥🔥 引入 Mermaid 绘图库
 import mermaid from "mermaid";
-
-// 初始化 Mermaid 配置
 mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
 
-// === 🛠️ 辅助工具 ===
-const filterSuggestionItems = (items: any[], query: string) => {
-  return items.filter((item) => 
-    item.title.toLowerCase().includes(query.toLowerCase()) || 
-    (item.aliases && item.aliases.some((alias: string) => alias.toLowerCase().includes(query.toLowerCase())))
-  );
-};
-
-const sortFileTree = (nodes: FileNode[]): FileNode[] => {
-    return [...nodes].sort((a, b) => {
-        if (a.is_dir && !b.is_dir) return -1;
-        if (!a.is_dir && b.is_dir) return 1;
-        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-    }).map(node => {
-        if (node.children && node.children.length > 0) {
-            return { ...node, children: sortFileTree(node.children) };
-        }
-        return node;
-    });
-};
-
-// 🛠️ 通用拖拽手柄组件
-const ResizeHandle = ({ onResizeStart }: { onResizeStart: (e: React.MouseEvent) => void }) => (
-    <div 
-        onMouseDown={onResizeStart}
-        className="export-exclude no-print"
-        title="拖动调整大小"
-        style={{
-            position: "absolute", bottom: "2px", right: "2px", width: "16px", height: "16px",
-            cursor: "nwse-resize", zIndex: 10, display: "flex", alignItems: "flex-end", justifyContent: "flex-end",
-            background: "rgba(255,255,255,0.7)", borderRadius: "4px"
-        }}
-    >
-        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path d="M10 2L2 10H10V2Z" fill="#666"/>
-        </svg>
-    </div>
-);
-
-// ==============================================================
-// 🖼️ 自定义 Image (图片) 块
-// ==============================================================
-const imageBlockSchema = {
-    type: "image" as const,
-    propSchema: {
-        ...defaultProps,
-        name: { default: "image" },
-        url: { default: "" },
-        width: { default: 500 }, 
-        showPreview: { default: true }
-    },
-    content: "none" as const,
-    toExternalHTML: (block: any) => {
-        const div = document.createElement("div");
-        const img = document.createElement("img");
-        img.src = block.props.url;
-        img.alt = block.props.name;
-        img.setAttribute("width", block.props.width.toString()); 
-        div.appendChild(img);
-        return { dom: div };
-    }
-};
-
-const ImageBlock = createReactBlockSpec(imageBlockSchema, {
-    render: ({ block, editor }) => {
-        const [size, setSize] = useState({ width: block.props.width });
-        const imgRef = useRef<HTMLImageElement>(null);
-
-        useEffect(() => {
-            if (block.props.width !== size.width) {
-                setSize({ width: block.props.width });
-            }
-        }, [block.props.width]);
-
-        const handleResizeStart = (e: React.MouseEvent) => {
-            e.preventDefault(); e.stopPropagation();
-            const startX = e.clientX;
-            const startWidth = size.width;
-
-            const onMouseMove = (moveEvent: MouseEvent) => {
-                const newWidth = Math.max(100, startWidth + (moveEvent.clientX - startX));
-                setSize({ width: newWidth });
-            };
-
-            const onMouseUp = (upEvent: MouseEvent) => {
-                const finalWidth = Math.max(100, startWidth + (upEvent.clientX - startX));
-                editor.updateBlock(block, { props: { ...block.props, width: finalWidth } });
-                window.removeEventListener("mousemove", onMouseMove);
-                window.removeEventListener("mouseup", onMouseUp);
-            };
-
-            window.addEventListener("mousemove", onMouseMove);
-            window.addEventListener("mouseup", onMouseUp);
-        };
-
-        return (
-            <div className="bn-image-block" style={{ position: "relative", display: "inline-block", maxWidth: "100%", margin: "10px 0" }}>
-                <img 
-                    ref={imgRef}
-                    src={block.props.url} 
-                    alt={block.props.name}
-                    draggable={false}
-                    style={{ 
-                        width: `${size.width}px`, 
-                        height: "auto", 
-                        borderRadius: "4px",
-                        boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-                        display: "block" 
-                    }} 
-                />
-                <ResizeHandle onResizeStart={handleResizeStart} />
-            </div>
-        );
-    }
-});
-
-
-// ==============================================================
-// 🧜‍♂️ Mermaid (流程图/思维导图) 块
-// ==============================================================
-const mermaidBlockSchema = {
-  type: "mermaid" as const,
-  propSchema: {
-    ...defaultProps,
-    code: { default: "graph TD;\nA-->B;" }, 
-    width: { default: 500 }, 
-    height: { default: 300 },
-  },
-  content: "none" as const,
-  toExternalHTML: (block: any) => {
-    const div = document.createElement("div");
-    div.className = "mermaid-export-data";
-    div.dataset.code = block.props.code;
-    div.innerText = `[流程图/思维导图]`;
-    div.style.width = block.props.width + "px";
-    div.style.height = block.props.height + "px";
-    return { dom: div };
-  }
-};
-
-const MermaidBlock = createReactBlockSpec(mermaidBlockSchema, {
-  render: ({ block, editor }) => {
-    const [isEditing, setIsEditing] = useState(false);
-    const [code, setCode] = useState(block.props.code);
-    const [size, setSize] = useState({ width: block.props.width, height: block.props.height });
-    
-    const containerRef = useRef<HTMLDivElement>(null);
-    const inputRef = useRef<HTMLTextAreaElement>(null);
-
-    useEffect(() => { setSize({ width: block.props.width, height: block.props.height }); }, [block.props.width, block.props.height]);
-
-    useEffect(() => {
-        if (containerRef.current && !isEditing) {
-            containerRef.current.innerHTML = "";
-            const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
-            mermaid.render(id, code).then(({ svg }) => {
-                if (containerRef.current) containerRef.current.innerHTML = svg;
-            }).catch((_e) => {
-                if (containerRef.current) containerRef.current.innerHTML = `<div style="color:red; font-size:12px; padding:10px;">语法错误</div>`;
-            });
-        }
-    }, [code, isEditing]);
-
-    const handleSaveCode = () => {
-        editor.updateBlock(block, { props: { ...block.props, code: code } });
-        setIsEditing(false);
-    };
-
-    const handleResizeStart = (e: React.MouseEvent) => {
-        e.preventDefault(); e.stopPropagation();
-        const startX = e.clientX; const startY = e.clientY;
-        const startWidth = size.width; const startHeight = size.height;
-
-        const onMouseMove = (moveEvent: MouseEvent) => {
-            const newWidth = Math.max(200, startWidth + (moveEvent.clientX - startX));
-            const newHeight = Math.max(100, startHeight + (moveEvent.clientY - startY));
-            setSize({ width: newWidth, height: newHeight });
-        };
-
-        const onMouseUp = (upEvent: MouseEvent) => {
-            const finalWidth = Math.max(200, startWidth + (upEvent.clientX - startX));
-            const finalHeight = Math.max(100, startHeight + (upEvent.clientY - startY));
-            editor.updateBlock(block, { props: { ...block.props, width: finalWidth, height: finalHeight } });
-            window.removeEventListener("mousemove", onMouseMove);
-            window.removeEventListener("mouseup", onMouseUp);
-        };
-
-        window.addEventListener("mousemove", onMouseMove);
-        window.addEventListener("mouseup", onMouseUp);
-    };
-
-    return (
-        <div className="mermaid-block-wrapper" style={{ margin: "10px 0", border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white", width: isEditing ? "100%" : `${size.width}px`, transition: isEditing ? "width 0.2s" : "none", position: "relative", maxWidth: "100%", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}>
-            <div className="export-exclude no-print" style={{ background: "#f5f6f7", padding: "5px 10px", display: "flex", justifyContent: "space-between", fontSize: "12px", color: "#666", borderBottom: "1px solid #eee", borderTopLeftRadius: "8px", borderTopRightRadius: "8px" }}>
-                <span style={{fontWeight: "bold", display:"flex", alignItems:"center", gap:"5px"}}>🧜‍♂️ 流程图</span>
-                <button onClick={() => setIsEditing(!isEditing)} style={{ cursor: "pointer", border: "none", background: "transparent", color: "#1890ff" }}>{isEditing ? "预览" : "编辑"}</button>
-            </div>
-            {isEditing ? (
-                <textarea ref={inputRef} value={code} onChange={(e) => setCode(e.target.value)} onBlur={handleSaveCode} style={{ width: "100%", height: "200px", padding: "10px", border: "none", fontFamily: "monospace", fontSize: "13px", resize: "vertical", outline: "none", background: "#fafafa" }} />
-            ) : (
-                <div ref={containerRef} style={{ padding: "10px", background: "white", height: `${size.height}px`, width: "100%", overflow: "auto", display: "flex", justifyContent: "center", alignItems: "center" }} onDoubleClick={() => setIsEditing(true)} />
-            )}
-            {!isEditing && <ResizeHandle onResizeStart={handleResizeStart} />}
-        </div>
-    );
-  }
-});
-
-// ==============================================================
-// 💻 Code 代码块
-// ==============================================================
-const codeBlockSchema = {
-  type: "codeBlock" as const,
-  propSchema: {
-    ...defaultProps,
-    text: { default: "" },      
-    language: { default: "cpp" },
-    width: { default: "100%" }, 
-    height: { default: 300 },   
-  },
-  content: "none" as const, 
-  toExternalHTML: (block: any) => {
-    const pre = document.createElement("pre");
-    pre.style.backgroundColor = "#f0f0f0";
-    const codeContent = block.props.text || "";
-    const lang = block.props.language || "text";
-    pre.innerText = `\`\`\`${lang}\n${codeContent}\n\`\`\``;
-    return { dom: pre };
-  }
-};
-
-const CodeBlock = createReactBlockSpec(codeBlockSchema, {
-  render: ({ block, editor }) => {
-    const [isEditing, setIsEditing] = useState(false);
-    const [code, setCode] = useState(() => { try { return decodeURIComponent(block.props.text); } catch { return block.props.text; } });
-    const [lang, setLang] = useState(block.props.language);
-    const [copyStatus, setCopyStatus] = useState("复制");
-    const [size, setSize] = useState({ 
-        width: block.props.width === "100%" ? "100%" : parseInt(block.props.width as string), 
-        height: block.props.height 
-    });
-    
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-    useEffect(() => { 
-        try { const decoded = decodeURIComponent(block.props.text); if (decoded !== code) setCode(decoded); } catch { if (block.props.text !== code) setCode(block.props.text); } 
-        if (block.props.language !== lang) setLang(block.props.language);
-        if (block.props.width !== size.width || block.props.height !== size.height) {
-             setSize({ 
-                width: block.props.width === "100%" ? "100%" : parseInt(block.props.width as string), 
-                height: block.props.height 
-            });
-        }
-    }, [block.props.text, block.props.language, block.props.width, block.props.height]);
-
-    useEffect(() => { if (isEditing && textareaRef.current) { textareaRef.current.focus(); } }, [isEditing]);
-
-    const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(code), language: lang } }); setIsEditing(false); };
-    const handleCopy = (e: React.MouseEvent) => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(code); setCopyStatus("已复制"); setTimeout(() => setCopyStatus("复制"), 2000); };
-    
-    const handleResizeStart = (e: React.MouseEvent) => {
-        e.preventDefault(); e.stopPropagation();
-        const startX = e.clientX; const startY = e.clientY;
-        const currentW = typeof size.width === 'number' ? size.width : (e.currentTarget.parentElement?.offsetWidth || 600);
-        const startWidth = currentW;
-        const startHeight = size.height;
-
-        const onMouseMove = (moveEvent: MouseEvent) => {
-            const newWidth = Math.max(300, startWidth + (moveEvent.clientX - startX));
-            const newHeight = Math.max(100, startHeight + (moveEvent.clientY - startY));
-            setSize({ width: newWidth, height: newHeight });
-        };
-
-        const onMouseUp = (upEvent: MouseEvent) => {
-            const finalWidth = Math.max(300, startWidth + (upEvent.clientX - startX));
-            const finalHeight = Math.max(100, startHeight + (upEvent.clientY - startY));
-            editor.updateBlock(block, { props: { ...block.props, width: finalWidth.toString(), height: finalHeight } });
-            window.removeEventListener("mousemove", onMouseMove);
-            window.removeEventListener("mouseup", onMouseUp);
-        };
-        window.addEventListener("mousemove", onMouseMove);
-        window.addEventListener("mouseup", onMouseUp);
-    };
-
-    const languages = [ { value: "cpp", label: "C++" }, { value: "javascript", label: "JavaScript" }, { value: "typescript", label: "TypeScript" }, { value: "python", label: "Python" }, { value: "java", label: "Java" }, { value: "go", label: "Go" }, { value: "rust", label: "Rust" }, { value: "html", label: "HTML" }, { value: "css", label: "CSS" }, { value: "sql", label: "SQL" }, { value: "bash", label: "Bash" }, { value: "json", label: "JSON" }, { value: "markdown", label: "Markdown" }, { value: "mermaid", label: "Mermaid" } ];
-
-    return (
-      <div className="code-block-container" style={{ margin: "15px 0", borderRadius: "6px", border: `1px solid #dee0e3`, backgroundColor: "#ffffff", boxShadow: "0 2px 6px rgba(0,0,0,0.03)", fontFamily: 'Menlo, Monaco, "Courier New", monospace', overflow: "hidden", maxWidth: "100%", display: "flex", flexDirection: "column", position: "relative", 
-          width: typeof size.width === 'number' ? `${size.width}px` : size.width, 
-          height: `${size.height}px` 
-      }} onDoubleClick={(e) => e.stopPropagation()}>
-        <div className="code-block-header export-exclude no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", height: "34px", backgroundColor: "#f5f6f7", borderBottom: `1px solid #dee0e3`, userSelect: "none", fontSize: "12px", color: "#646a73", flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center' }}>
-             <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块</span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center" }}>
-             <select value={lang} onChange={(e) => { const newLang = e.target.value; setLang(newLang); editor.updateBlock(block, { props: { ...block.props, language: newLang } }); }} onClick={(e) => e.stopPropagation()} style={{ background: "transparent", border: "none", outline: "none", color: "#646a73", cursor: "pointer", fontWeight: 500, fontSize: "12px", fontFamily: "sans-serif", textAlign: "left" }}>
-              {languages.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
-            </select>
-            <span style={{ color: "#dee0e3", margin: "0 6px" }}>|</span>
-            <button onClick={handleCopy} style={{ background: "transparent", border: "none", cursor: "pointer", color: "#646a73", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px", padding: "4px 6px", borderRadius: "4px", transition: "background 0.2s" }}><span>📄</span> <span style={{fontFamily: "sans-serif"}}>{copyStatus}</span></button>
-          </div>
-        </div>
-        <div style={{ position: "relative", flex: 1, backgroundColor: "#ffffff", cursor: isEditing ? "text" : "default", overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          {isEditing ? (
-            <textarea ref={textareaRef} value={code} onChange={(e) => setCode(e.target.value)} onBlur={handleSave} onKeyDown={(e) => { if (e.key === 'Tab') { e.preventDefault(); const start = e.currentTarget.selectionStart; const end = e.currentTarget.selectionEnd; const val = e.currentTarget.value; e.currentTarget.value = val.substring(0, start) + "  " + val.substring(end); e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2; setCode(e.currentTarget.value); } if (e.key === 'Escape') handleSave(); }} spellCheck={false} style={{ flex: 1, height: "100%", width: "100%", padding: "12px", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", border: "none", outline: "none", backgroundColor: "#ffffff", color: "#333", resize: "none", whiteSpace: "pre", display: "block", overflow: "auto" }} />
-          ) : (
-            <div onClick={() => setIsEditing(true)} style={{ flex: 1, height: "100%", width: "100%", backgroundColor: "#ffffff", cursor: "text", overflow: "auto" }}>
-              <SyntaxHighlighter language={block.props.language} style={vs} PreTag="div" customStyle={{ margin: 0, padding: "12px", backgroundColor: "transparent", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} codeTagProps={{ style: { fontFamily: 'Menlo, Monaco, "Courier New", monospace', backgroundColor: "transparent" } }} showLineNumbers={true} lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}>
-                {code || " "} 
-              </SyntaxHighlighter>
-              {!code && <div className="export-exclude no-print" style={{position:"absolute", top: 12, left: 60, color: "#ccc", pointerEvents:"none", fontFamily:"sans-serif", fontSize:"13px"}}>点击输入代码...</div>}
-            </div>
-          )}
-        </div>
-        {!isEditing && <ResizeHandle onResizeStart={handleResizeStart} />}
-      </div>
-    );
-  }
-});
-
-// ==============================================================
-// 📂 文件块 & LaTeX 块
-// ==============================================================
-const getFileType = (name: string): 'image' | 'text' | 'docx' | 'pdf' | 'other' => {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  const imageExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
-  const textExts = ['txt','md','json','xml','csv','log','js','ts','jsx','tsx','py','java',
-                    'c','cpp','h','hpp','rs','go','rb','php','html','css','scss','less',
-                    'sh','bash','yml','yaml','toml','ini','cfg','conf'];
-  const docxExts = ['docx'];
-  const pdfExts = ['pdf'];
-  if (imageExts.includes(ext)) return 'image';
-  if (textExts.includes(ext)) return 'text';
-  if (docxExts.includes(ext)) return 'docx';
-  if (pdfExts.includes(ext)) return 'pdf';
-  return 'other';
-};
-
-const fileBlockSchema = {
-  type: "file" as const,
-  propSchema: { ...defaultProps, name: { default: "Unknown File" }, url: { default: "" }, },
-  content: "none" as const,
-  toExternalHTML: (block: any) => {
-    const div = document.createElement("div");
-    const link = document.createElement("a");
-    link.href = block.props.url; 
-    link.innerText = `[附件: ${block.props.name}]`;
-    link.style.color = "#1890ff";
-    div.appendChild(link);
-    return { dom: div };
-  }
-};
-const FileBlock = createReactBlockSpec(fileBlockSchema, {
-  render: ({ block }) => {
-    const { name, url } = block.props;
-    const [preview, setPreview] = useState<string | null>(null);
-    const [loading, setLoading] = useState(false);
-    const [isExpanded, setIsExpanded] = useState(true);
-    const fileType = getFileType(name || '');
-
-    useEffect(() => {
-      if (fileType === 'other') return;
-      if (fileType === 'image') {
-        setPreview(url);
-        return;
-      }
-      // PDF: render first page as image
-      if (fileType === 'pdf') {
-        let cancelled = false;
-        setLoading(true);
-        (async () => {
-          try {
-            const pdf = await pdfjsLib.getDocument({ url }).promise;
-            const page = await pdf.getPage(1);
-            const viewport = page.getViewport({ scale: 1.5 });
-            const canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) throw new Error('no canvas context');
-            await page.render({ canvas, canvasContext: ctx, viewport }).promise;
-            if (!cancelled) setPreview(canvas.toDataURL());
-          } catch { if (!cancelled) setPreview(null); }
-          finally { if (!cancelled) setLoading(false); }
-        })();
-        return () => { cancelled = true; };
-      }
-      // Word docx: extract raw text via mammoth
-      if (fileType === 'docx') {
-        let cancelled = false;
-        setLoading(true);
-        (async () => {
-          try {
-            const response = await fetch(url);
-            const arrayBuffer = await response.arrayBuffer();
-            const result = await mammoth.extractRawText({ arrayBuffer });
-            if (!cancelled) setPreview(result.value);
-          } catch { if (!cancelled) setPreview(null); }
-          finally { if (!cancelled) setLoading(false); }
-        })();
-        return () => { cancelled = true; };
-      }
-      // Text file: read full content
-      let cancelled = false;
-      setLoading(true);
-      (async () => {
-        try {
-          const response = await fetch(url);
-          const content = await response.text();
-          if (!cancelled) setPreview(content);
-        } catch { if (!cancelled) setPreview(null); }
-        finally { if (!cancelled) setLoading(false); }
-      })();
-      return () => { cancelled = true; };
-    }, [url, fileType]);
-
-    const handleDbClick = async (e: React.MouseEvent) => {
-      e.preventDefault(); e.stopPropagation();
-      try { await invoke("open_file", { url: url }); }
-      catch (err) { alert("无法打开文件: " + err); }
-    };
-
-    const iconMap: Record<string, string> = { image: '🖼️', text: '📝', docx: '📝', pdf: '📕', other: '📄' };
-
-    const previewStyle: React.CSSProperties = {
-      margin: 0, padding: "10px", fontSize: "11px", lineHeight: "1.5", color: "#555",
-      whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: "300px",
-      overflowY: "auto", fontFamily: 'Menlo, Monaco, "Courier New", monospace'
-    };
-
-    return (
-      <div className={"bn-file-block-content"} onDoubleClick={handleDbClick}
-        style={{ display: "flex", flexDirection: "column", padding: "10px", margin: "5px 0",
-          border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white",
-          cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%",
-          boxShadow: "0 1px 2px rgba(0,0,0,0.05)" }}
-        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f7f9fb"}
-        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "white"}
-        title="双击打开文件">
-
-        {/* Header row */}
-        <div style={{ display: "flex", alignItems: "center" }}>
-          <div style={{ fontSize: "24px", marginRight: "12px" }}>{iconMap[fileType] || '📄'}</div>
-          <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", flex: 1 }}>
-            <span style={{ fontSize: "14px", fontWeight: 500, color: "#333", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {name || "未知文件"}
-            </span>
-            <span className="export-exclude no-print" style={{ fontSize: "11px", color: "#999" }}>
-              双击调用系统程序打开
-            </span>
-          </div>
-          {/* Toggle expand/collapse - only for previewable types */}
-          {fileType !== 'other' && (
-            <button onClick={(e) => { e.stopPropagation(); setIsExpanded(!isExpanded); }}
-              className="export-exclude no-print"
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "12px", padding: "2px 6px", color: "#999", borderRadius: "4px" }}
-              title={isExpanded ? "收起预览" : "展开预览"}>
-              {isExpanded ? '▼' : '▶'}
-            </button>
-          )}
-        </div>
-
-        {/* Preview area - collapsible */}
-        {isExpanded && fileType === 'image' && preview && (
-          <div style={{ marginTop: "8px", borderRadius: "6px", overflow: "hidden", border: "1px solid #f0f0f0" }}>
-            <img src={preview} alt={name} style={{ maxWidth: "100%", maxHeight: "200px", display: "block", objectFit: "contain" }}
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-          </div>
-        )}
-        {isExpanded && fileType === 'pdf' && (
-          <div style={{ marginTop: "8px", borderRadius: "6px", overflow: "hidden", border: "1px solid #f0f0f0" }}>
-            {loading ? (
-              <div style={{ padding: "20px", fontSize: "12px", color: "#999", textAlign: "center" }}>解析 PDF 中...</div>
-            ) : preview ? (
-              <img src={preview} alt={name} style={{ maxWidth: "100%", maxHeight: "300px", display: "block", objectFit: "contain", cursor: "pointer" }}
-                onClick={handleDbClick} title="双击打开原文件"
-                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-            ) : (
-              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>无法预览</div>
-            )}
-          </div>
-        )}
-        {isExpanded && (fileType === 'text' || fileType === 'docx') && (
-          <div style={{ marginTop: "8px", borderRadius: "6px", overflow: "hidden", border: "1px solid #f0f0f0", backgroundColor: "#fafafa" }}>
-            {loading ? (
-              <div style={{ padding: "12px", fontSize: "12px", color: "#999" }}>
-                {fileType === 'docx' ? '解析 Word 文档中...' : '加载预览中...'}
-              </div>
-            ) : preview ? (
-              <pre style={previewStyle}>{preview}</pre>
-            ) : (
-              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>无法预览</div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  },
-});
-const latexBlockSchema = { 
-    type: "latex" as const, 
-    propSchema: { ...defaultProps, text: { default: "" } }, 
-    content: "none" as const,
-    toExternalHTML: (block: any) => {
-        const div = document.createElement("p");
-        div.innerText = `$$\n${block.props.text}\n$$`;
-        div.style.fontFamily = "Consolas, monospace";
-        return { dom: div };
-    }
-};
-const LatexBlock = createReactBlockSpec(latexBlockSchema, {
-    render: ({ block, editor }) => {
-      const divRef = useRef<HTMLDivElement>(null);
-      const [isEditing, setIsEditing] = useState(false);
-      const [inputValue, setInputValue] = useState(() => { try { return decodeURIComponent(block.props.text); } catch { return block.props.text; } });
-      const textAreaRef = useRef<HTMLTextAreaElement>(null);
-      useEffect(() => { try { const decoded = decodeURIComponent(block.props.text); if (decoded !== inputValue) setInputValue(decoded); } catch { if (block.props.text !== inputValue) setInputValue(block.props.text); } }, [block.props.text]);
-      useEffect(() => { if (isEditing && textAreaRef.current) textAreaRef.current.focus(); }, [isEditing]);
-      useEffect(() => { if (!isEditing && divRef.current) { if (!inputValue) { divRef.current.innerText = "点击输入 LaTeX 公式..."; divRef.current.style.color = "#ccc"; } else { try { katex.render(inputValue, divRef.current, { throwOnError: false, displayMode: true, output: "html" }); divRef.current.style.color = "inherit"; } catch (e) { divRef.current.innerText = "⚠️ 公式错误"; } } } }, [inputValue, isEditing]);
-      const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(inputValue) } }); setIsEditing(false); };
-      return ( <div style={{ padding: "10px", margin: "5px 0", userSelect: "none" }}> {isEditing ? ( <div className="export-exclude no-print" style={{ display: "flex", flexDirection: "column", gap: "5px" }}> <textarea ref={textAreaRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === "Escape") { setIsEditing(false); setInputValue(block.props.text); } }} onBlur={handleSave} placeholder="输入 LaTeX 公式..." style={{ width: "100%", minHeight: "80px", padding: "10px", fontFamily: "Consolas, Monaco, monospace", fontSize: "14px", borderRadius: "6px", border: "2px solid #1890ff", outline: "none", resize: "vertical", backgroundColor: "#f9f9f9" }} /> <div style={{fontSize: "12px", color: "#888"}}>按 Enter 保存</div> </div> ) : ( <div ref={divRef} onClick={() => setIsEditing(true)} style={{ minHeight: "40px", cursor: "pointer", padding: "10px", borderRadius: "6px", textAlign: "center" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(0,0,0,0.03)"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"} title="点击编辑公式" /> )} </div> );
-    },
-});
-
-const schema = BlockNoteSchema.create({ 
-    blockSpecs: { 
-        ...defaultBlockSpecs, 
-        image: ImageBlock(),
-        latex: LatexBlock(), 
-        codeBlock: CodeBlock(),
-        file: FileBlock(),
-        mermaid: MermaidBlock(),
-    } 
-});
-
-// === 🎨 弹窗组件 (保持不变，已添加根目录选项) ===
-interface FileNode { name: string; path: string; is_dir: boolean; children: FileNode[]; }
-interface TrashItem { name: string; is_dir: boolean; path: string; }
-interface DialogProps { isOpen: boolean; type: 'confirm' | 'prompt' | 'tree-select' | 'settings' | 'alert' | 'save-guard' | 'trash'; title: string; message?: string; defaultValue?: string; treeData?: FileNode[]; disabledPath?: string; trashItems?: TrashItem[]; bgImage?: string | null; bgOpacity?: number; bgBlur?: number; onSetBgImage?: (file: File) => void; onSetBgOpacity?: (val: number) => void; onSetBgBlur?: (val: number) => void; onClearBg?: () => void; onEmptyTrash?: () => void; onRestore?: (name: string) => void; onDeleteForever?: (name: string) => void; onConfirm: (value: any) => void; onCancel: () => void; }
-const CustomDialog = (props: DialogProps) => {
-  const { isOpen, type, title, message, defaultValue, treeData, disabledPath, trashItems, bgImage, bgOpacity, bgBlur, onConfirm, onCancel, onEmptyTrash, onRestore, onDeleteForever } = props;
-  const [inputValue, setInputValue] = useState(defaultValue || "");
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-  useEffect(() => { if (isOpen) { setInputValue(defaultValue || ""); setExpandedPaths(new Set()); } }, [isOpen, defaultValue]);
-  if (!isOpen) return null;
-  const renderDialogTree = (nodes: FileNode[], depth = 0) => { return nodes.map(node => { if (!node.is_dir) return null; const isDisabled = disabledPath && (node.path === disabledPath || node.path.startsWith(disabledPath + "/")); const isExpanded = expandedPaths.has(node.path); const isSelected = inputValue === node.path; return ( <div key={node.path}> <div style={{ padding: "6px 8px", paddingLeft: `${depth * 18 + 8}px`, cursor: isDisabled ? "not-allowed" : "pointer", background: isSelected ? "#e6f7ff" : "transparent", color: isDisabled ? "#ccc" : (isSelected ? "#1890ff" : "#333"), borderRadius: "4px", display: "flex", alignItems: "center", marginBottom: "1px", fontSize: "13px" }} onClick={() => { if (isDisabled) return; setInputValue(node.path); }}> <span style={{ marginRight: "6px", width: "12px", display: "inline-block", textAlign: "center", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", cursor: "pointer", color: "#999" }} onClick={(e) => { e.stopPropagation(); const newSet = new Set(expandedPaths); if (newSet.has(node.path)) newSet.delete(node.path); else newSet.add(node.path); setExpandedPaths(newSet); }}>▶</span> <span style={{ marginRight: "4px" }}>{isExpanded ? "📂" : "📁"}</span><span>{node.name}</span> </div> {isExpanded && node.children && <div>{renderDialogTree(node.children, depth + 1)}</div>} </div> ); }); };
-  return ( <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0, 0, 0, 0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2147483647 }} onClick={onCancel}> <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: (type === 'settings' || type === 'trash') ? "500px" : "350px", borderRadius: "12px", boxShadow: "0 10px 25px rgba(0,0,0,0.1)", padding: "24px", display:"flex", flexDirection:"column", maxHeight:"85vh", animation: "popIn 0.2s ease" }}> <h3 style={{ margin: "0 0 10px 0", fontSize: "18px", color: "#333", borderBottom: "1px solid #eee", paddingBottom: "10px", display:"flex", justifyContent:"space-between" }}> {title} {type === 'trash' && <button onClick={onEmptyTrash} style={{fontSize:"12px", color:"#ff4d4f", background:"transparent", border:"none", cursor:"pointer"}}>🗑️ 清空所有</button>} </h3> {message && <p style={{ margin: "0 0 20px 0", fontSize: "14px", color: "#666", lineHeight: "1.5" }}>{message}</p>} {type === 'trash' && ( <div style={{ flex: 1, overflowY: "auto", minHeight: "300px", border: "1px solid #f0f0f0", borderRadius: "6px", padding: "5px" }}> {trashItems && trashItems.length > 0 ? ( trashItems.map(item => ( <div key={item.path} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"8px", borderBottom:"1px solid #f9f9f9", fontSize:"13px" }}> <div style={{ display:"flex", alignItems:"center", overflow:"hidden" }}> <span style={{ marginRight:"6px" }}>{item.is_dir ? "📂" : "📄"}</span> <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"250px" }} title={item.name}>{item.name}</span> </div> <div style={{ display:"flex", gap:"8px" }}> <button onClick={() => onRestore && onRestore(item.path)} style={{ color:"#1890ff", background:"transparent", border:"none", cursor:"pointer", fontSize:"12px" }}>还原</button> <button onClick={() => onDeleteForever && onDeleteForever(item.path)} style={{ color:"#999", background:"transparent", border:"none", cursor:"pointer", fontSize:"12px" }}>❌</button> </div> </div> )) ) : (<div style={{ padding:"20px", textAlign:"center", color:"#ccc", fontSize:"13px" }}>回收站是空的</div>)} </div> )} {type === 'settings' && ( <div style={{ display: "flex", flexDirection: "column", gap: "20px", marginBottom: "20px" }}> <div> <label style={{ display:"block", fontSize:"13px", fontWeight:"bold", marginBottom:"8px", color:"#555" }}>自定义背景图</label> <div style={{ display: "flex", gap: "10px", alignItems: "center" }}> {bgImage ? (<div style={{ width: "60px", height: "40px", borderRadius: "4px", background: `url(${convertFileSrc(bgImage)}) center/cover`, border: "1px solid #ddd" }}></div>) : (<div style={{ width: "60px", height: "40px", borderRadius: "4px", background: "#f0f0f0", border: "1px dashed #ccc", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"10px", color:"#999" }}>无</div>)} <input type="file" accept="image/*" id="bg-upload" style={{ display: "none" }} onChange={(e) => { if (e.target.files && e.target.files[0] && props.onSetBgImage) props.onSetBgImage(e.target.files[0]); }} /> <button onClick={() => document.getElementById('bg-upload')?.click()} style={{ padding: "6px 12px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>选择图片...</button> {bgImage && <button onClick={props.onClearBg} style={{ padding: "6px 12px", border: "none", background: "#ff4d4f", color: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>清除</button>} </div> </div> <div><label style={{ fontSize:"13px", fontWeight:"bold", color:"#555" }}>白纸浓度: {Math.round((bgOpacity || 0.5) * 100)}%</label><input type="range" min="0.05" max="1" step="0.05" value={bgOpacity} onChange={(e) => props.onSetBgOpacity && props.onSetBgOpacity(parseFloat(e.target.value))} style={{ width: "100%", accentColor: "#1890ff" }} /></div> <div><label style={{ fontSize:"13px", fontWeight:"bold", color:"#555" }}>毛玻璃模糊: {bgBlur} px</label><input type="range" min="0" max="20" step="1" value={bgBlur} onChange={(e) => props.onSetBgBlur && props.onSetBgBlur(parseInt(e.target.value))} style={{ width: "100%", accentColor: "#1890ff" }} /></div> </div> )} {type === 'prompt' && <input autoFocus type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if(e.key === 'Enter') onConfirm(inputValue); }} style={{ width: "100%", padding: "10px", marginBottom: "20px", borderRadius: "6px", border: "1px solid #ddd", fontSize: "14px", outline: "none", boxSizing: "border-box" }} />} {type === 'tree-select' && treeData && (
-      <div style={{ flex: 1, overflowY: "auto", border: "1px solid #eee", borderRadius: "6px", padding: "5px", marginBottom: "20px", minHeight: "200px" }}>
-          {/* 🔥 新增：根目录选项 */}
-          <div 
-              onClick={() => setInputValue("")} 
-              style={{ 
-                  padding: "6px 8px", 
-                  paddingLeft: "8px", 
-                  cursor: "pointer", 
-                  background: inputValue === "" ? "#e6f7ff" : "transparent", 
-                  color: inputValue === "" ? "#1890ff" : "#333", 
-                  borderRadius: "4px", 
-                  display: "flex", 
-                  alignItems: "center", 
-                  marginBottom: "1px", 
-                  fontSize: "13px",
-                  fontWeight: "bold"
-              }}
-          >
-              <span style={{ marginRight: "6px", width: "12px", textAlign:"center" }}>🏠</span>
-              <span>根目录</span>
-          </div>
-          {renderDialogTree(treeData)}
-      </div>
-  )} 
-  <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "20px" }}> {type !== 'trash' && <button onClick={onCancel} style={{ padding: "8px 16px", border: "1px solid #ddd", borderRadius: "6px", background: "white", color: "#666", cursor: "pointer", fontSize: "14px" }}>取消</button>} <button onClick={() => onConfirm(type === 'prompt' || type === 'tree-select' ? inputValue : true)} style={{ padding: "8px 16px", border: "none", borderRadius: "6px", background: "#1890ff", color: "white", cursor: "pointer", fontSize: "14px", fontWeight: "500" }}>{type === 'trash' ? "关闭" : "确定"}</button> </div> </div> <style>{`@keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }`}</style> </div> );
-};
-
-// 📦 主程序逻辑
+import { filterSuggestionItems, sortFileTree } from "./utils/fileTree";
+import { encodeSpacesInBlocks } from "./utils/encode";
+import CustomDialog from "./components/CustomDialog";
+import type { FileNode, TrashItem } from "./components/CustomDialog";
+import { schema } from "./blocks/schema";
 
 interface TOCItem {
   id: string;
@@ -609,9 +27,12 @@ interface TOCItem {
   level: number;
 }
 
+interface Tab { path: string; title: string; isDirty: boolean; }
 function App() {
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
-  const [currentFile, setCurrentFile] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeTabIndex, setActiveTabIndex] = useState(-1);
+  const currentFile = tabs[activeTabIndex]?.path ?? null;
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
@@ -620,15 +41,33 @@ function App() {
   const [isResizing, setIsResizing] = useState(false);
   const [status, setStatus] = useState("就绪");
   const [lastSaveTime, setLastSaveTime] = useState<string>("");
-  
+
   // 🔥 目录状态与开关
   const [toc, setToc] = useState<TOCItem[]>([]);
-  const [isTocOpen, setIsTocOpen] = useState(true);
+  const [isTocOpen, setIsTocOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const sidebarSearchRef = useRef<HTMLInputElement>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<{path:string;line:number;content:string}[]>([]);
+  const [searchReplace, setSearchReplace] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [toasts, setToasts] = useState<{id:number; msg:string; type:'success'|'error'|'info'}[]>([]);
+  const toastIdRef = useRef(0);
+  const addToast = (msg: string, type: 'success'|'error'|'info' = 'info') => {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [...prev, {id, msg, type}]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 2800);
+  };
+  const [inlineSearch, setInlineSearch] = useState<{open:boolean; query:string; results:{blockId:string;text:string}[]; idx:number}>({open:false,query:'',results:[],idx:0});
+  const [favPaths, setFavPaths] = useState<Set<string>>(() => new Set(JSON.parse(localStorage.getItem("fav_paths")||"[]")));
+  const [shortcutPanel, setShortcutPanel] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{x:number;y:number;node:FileNode}|null>(null);
+  const [isReadMode, setIsReadMode] = useState(false);
+  const [isFocusMode, setIsFocusMode] = useState(false);
 
-  const isDirtyRef = useRef(false);
   const isLoadingRef = useRef(false);
   const isExitingRef = useRef(false);
-  const [initialAssetUrls, setInitialAssetUrls] = useState<Set<string>>(new Set()); 
+  const [initialAssetUrls, setInitialAssetUrls] = useState<Set<string>>(new Set());
 
   const currentFileRef = useRef<string | null>(null);
   useEffect(() => { currentFileRef.current = currentFile; }, [currentFile]);
@@ -695,14 +134,16 @@ function App() {
       setToc(items);
   };
 
-  const onEditorChange = () => { 
-      if (isExitingRef.current || isLoadingRef.current || !currentFileRef.current) return; 
+  const onEditorChange = () => {
+      if (isExitingRef.current || isLoadingRef.current || !currentFileRef.current) return;
       updateTOC(editor);
 
-      if (!isDirtyRef.current) { 
-          isDirtyRef.current = true; 
-          setStatus("● 未保存"); 
-      } 
+      const idx = activeTabIndex;
+      if (idx >= 0 && !tabs[idx].isDirty) {
+          setTabs(prev => prev.map((t, i) => i === idx ? { ...t, isDirty: true } : t));
+          setStatus("● 未保存");
+      }
+
   };
 
   const editor = useCreateBlockNote({ 
@@ -720,32 +161,6 @@ function App() {
   };
   
   const handleBackgroundClick = (e: React.MouseEvent) => { if (e.target === e.currentTarget) setSelectedFolder(null); };
-
-  // 🔥 编码行间空格：将2个以上连续空格转为 &nbsp; 以绕过 rehype-minify-whitespace
-  const encodeSpacesInBlocks = (blocks: any[]): any[] => {
-    const encode = (text: string): string =>
-      text.replace(/ {2,}/g, (m) => ' '.repeat(m.length));
-
-    return blocks.map((block) => {
-      const cloned = JSON.parse(JSON.stringify(block));
-      // Handle empty paragraph: insert &nbsp; so markdown round-trip preserves it
-      const isEmptyParagraph = cloned.type === 'paragraph' && (
-        !Array.isArray(cloned.content) || cloned.content.length === 0 ||
-        (cloned.content.length === 1 && cloned.content[0].type === 'text' && !cloned.content[0].text)
-      );
-      if (isEmptyParagraph) {
-        cloned.content = [{ type: 'text', text: ' ', styles: {} }];
-      } else if (Array.isArray(cloned.content)) {
-        for (const node of cloned.content) {
-          if (typeof node.text === 'string') node.text = encode(node.text);
-        }
-      }
-      if (Array.isArray(cloned.children)) {
-        cloned.children = encodeSpacesInBlocks(cloned.children);
-      }
-      return cloned;
-    });
-  };
 
   const saveCurrentNote = async () => {
     const fileToSave = currentFileRef.current;
@@ -793,7 +208,7 @@ function App() {
 
       await invoke("save_note", { path: fileToSave, content: finalMarkdown });
       setInitialAssetUrls(currentAssetUrls);
-      isDirtyRef.current = false; 
+      setTabs(prev => prev.map((t, i) => i === activeTabIndex ? { ...t, isDirty: false } : t));
       setStatus("已保存");
       
       const now = new Date();
@@ -801,8 +216,10 @@ function App() {
     } catch(e) { setStatus("保存失败"); console.error(e); }
   };
 
-  const loadNote = async (path: string) => { 
-    if (isDirtyRef.current) { await saveCurrentNote(); }
+  const loadNote = async (path: string) => {
+    // Save current tab if dirty before switching
+    const curIdx = activeTabIndex;
+    if (curIdx >= 0 && tabs[curIdx]?.isDirty) { await saveCurrentNote(); }
     setStatus(`加载 ${path}...`); isLoadingRef.current = true; 
     
     const now = new Date();
@@ -893,28 +310,53 @@ function App() {
       };
       cleanNbsp(processedBlocks);
 
-      editor.replaceBlocks(editor.document, processedBlocks.length === 0 ? [{ type: "paragraph", content: [] }] : processedBlocks); 
+      editor.replaceBlocks(editor.document, processedBlocks.length === 0 ? [{ type: "paragraph", content: [] }] : processedBlocks);
       setInitialAssetUrls(getAllAssetUrls(processedBlocks));
-      setCurrentFile(path); 
+      // Add or activate tab
+      const title = path.includes("/") ? path.split("/").pop()! : path;
+      setTabs(prev => {
+        const existing = prev.findIndex(t => t.path === path);
+        if (existing >= 0) { setActiveTabIndex(existing); return prev; }
+        setActiveTabIndex(prev.length);
+        return [...prev, { path, title, isDirty: false }];
+      });
       updateTOC(editor);
-      isDirtyRef.current = false; 
       setStatus("已加载"); 
     } catch (e) { console.error(e); setStatus("加载失败"); } 
     finally { setTimeout(() => { isLoadingRef.current = false; }, 300); }
   };
 
-  useEffect(() => { const handleKeyDown = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveCurrentNote(); } }; window.addEventListener("keydown", handleKeyDown); return () => window.removeEventListener("keydown", handleKeyDown); }, [editor, initialAssetUrls]);
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === 's') { e.preventDefault(); saveCurrentNote(); }
+      else if (mod && e.key === 'k') { e.preventDefault(); setIsSidebarOpen(true); setTimeout(() => sidebarSearchRef.current?.focus(), 100); }
+      else if (mod && e.shiftKey && e.key === 'F') { e.preventDefault(); setSearchOpen(true); setSearchQuery(""); setSearchResults([]); }
+      else if (mod && e.key === 'f' && !e.shiftKey) {
+        e.preventDefault();
+        setInlineSearch(prev => ({...prev, open: true, query: '', results: [], idx: 0}));
+        setTimeout(() => document.getElementById('inline-search-input')?.focus(), 50);
+      }
+      else if (mod && e.key === 'z' && e.shiftKey) { e.preventDefault(); editor.redo(); }
+      else if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); editor.undo(); }
+      else if (mod && e.shiftKey && e.key === 'D') { e.preventDefault(); setIsFocusMode(prev => !prev); }
+      else if (e.key === 'Escape') { setSearchOpen(false); setInlineSearch(prev=>({...prev, open: false})); setShortcutPanel(false); setCtxMenu(null); }
+      else if (e.key === '?' && !mod && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) { e.preventDefault(); setShortcutPanel(true); }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editor, initialAssetUrls]);
   const silentGC = async () => { try { await invoke("gc_unused_assets"); } catch (e) { console.warn(e); } };
   useEffect(() => { refreshTree(); silentGC(); }, []);
 
-  const filterNodes = (nodes: FileNode[], term: string): FileNode[] => { 
-    if (!term) return nodes; 
-    return nodes.map(node => { 
-      if (node.is_dir) { const children = filterNodes(node.children, term); if (children.length > 0 || node.name.toLowerCase().includes(term.toLowerCase())) return { ...node, children }; return null; } 
-      return node.name.toLowerCase().includes(term.toLowerCase()) ? node : null; 
-    }).filter(Boolean) as FileNode[]; 
+  const filterNodes = (nodes: FileNode[], term: string): FileNode[] => {
+    if (!term) return nodes;
+    return nodes.map(node => {
+      if (node.is_dir) { const children = filterNodes(node.children, term); if (children.length > 0 || node.name.toLowerCase().includes(term.toLowerCase())) return { ...node, children }; return null; }
+      return node.name.toLowerCase().includes(term.toLowerCase()) ? node : null;
+    }).filter(Boolean) as FileNode[];
   };
-  
+
   const displayedTree = useMemo(() => {
       const filtered = filterNodes(fileTree, searchTerm);
       return sortFileTree(filtered);
@@ -923,17 +365,98 @@ function App() {
   const startResizing = useCallback(() => setIsResizing(true), []);
   const resize = useCallback((e: MouseEvent) => { if (isResizing) setSidebarWidth(Math.max(150, Math.min(e.clientX, 600))); }, [isResizing]);
   useEffect(() => { window.addEventListener("mousemove", resize); window.addEventListener("mouseup", () => setIsResizing(false)); return () => { window.removeEventListener("mousemove", resize); window.removeEventListener("mouseup", () => setIsResizing(false)); }; }, [resize]);
+  useEffect(() => { const close = () => setCtxMenu(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
 
-  const handleMove = async (e: React.MouseEvent, node: FileNode) => { e.stopPropagation(); const currentParent = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : ""; const targetFolder = await showDialog('tree-select', '移动到...', { message: `选择 "${node.name}" 的新位置：`, defaultValue: currentParent, treeData: fileTree, disabledPath: node.is_dir ? node.path : undefined }); if (targetFolder === null || targetFolder === currentParent) return; const srcPath = node.path; const newPath = targetFolder ? `${targetFolder}/${node.name}` : node.name; try { await saveCurrentNote(); await invoke("rename_item", { oldPath: srcPath, newPath: newPath, isDir: node.is_dir }); await refreshTree(); if (currentFile === srcPath) setCurrentFile(newPath); } catch (err) { alert("移动失败: " + err); } };
-  const handleDelete = async (e: React.MouseEvent, path: string, is_dir: boolean) => { e.stopPropagation(); const confirmed = await showDialog('confirm', `删除`, { message: `确认要将 "${path}" 放入回收站吗？` }); if (!confirmed) return; try { if (currentFile === path || (currentFile && currentFile.startsWith(path + "/"))) { setCurrentFile(null); isDirtyRef.current = false; editor.replaceBlocks(editor.document, []); setInitialAssetUrls(new Set()); } await invoke("delete_item", { path, isDir: is_dir }); await refreshTree(); } catch (err) { alert("删除失败: " + err); } };
-  const handleRename = async (e: React.MouseEvent, node: FileNode) => { e.stopPropagation(); const newName = await showDialog('prompt', '重命名', { defaultValue: node.name }); if (!newName || newName === node.name) return; const parentDir = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : ""; const newPath = parentDir ? `${parentDir}/${newName}` : newName; try { await saveCurrentNote(); await invoke("rename_item", { oldPath: node.path, newPath: newPath, isDir: node.is_dir }); await refreshTree(); if (currentFile === node.path) setCurrentFile(newPath); } catch (err) { alert("重命名失败: " + err); } };
-  const handleCreate = async (type: 'folder' | 'note') => { const name = await showDialog('prompt', type === 'folder' ? "新建文件夹" : "新建笔记", { message: "请输入名称：" }); if (!name) return; const basePath = selectedFolder ? `${selectedFolder}/${name}` : name; try { await saveCurrentNote(); if (type === 'folder') await invoke("create_folder", { path: basePath }); else { await invoke("create_note", { path: basePath }); await loadNote(basePath); } await refreshTree(); } catch (e) { alert("创建失败: " + e); } };
+  const handleMove = async (e: React.MouseEvent, node: FileNode) => { e.stopPropagation(); const currentParent = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : ""; const targetFolder = await showDialog('tree-select', '移动到...', { message: `选择 "${node.name}" 的新位置：`, defaultValue: currentParent, treeData: fileTree, disabledPath: node.is_dir ? node.path : undefined }); if (targetFolder === null || targetFolder === currentParent) return; const srcPath = node.path; const newPath = targetFolder ? `${targetFolder}/${node.name}` : node.name; try { await saveCurrentNote(); await invoke("rename_item", { oldPath: srcPath, newPath: newPath, isDir: node.is_dir }); await refreshTree(); if (currentFile === srcPath) { setTabs(prev => prev.map(t => t.path === srcPath ? { ...t, path: newPath, title: newPath.includes("/") ? newPath.split("/").pop()! : newPath } : t)); } } catch (err) { addToast("移动失败: " + err, 'error'); } };
+  const closeTab = async (path: string) => {
+    const idx = tabs.findIndex(t => t.path === path);
+    if (idx < 0) return;
+    if (idx === activeTabIndex && tabs[idx]?.isDirty) await saveCurrentNote();
+
+    const nextTabs = tabs.filter((_, i) => i !== idx);
+    if (nextTabs.length === 0) {
+      setTabs([]);
+      setActiveTabIndex(-1);
+      editor.replaceBlocks(editor.document, []);
+      setInitialAssetUrls(new Set());
+    } else {
+      setTabs(nextTabs);
+      let newActiveIdx = activeTabIndex;
+      if (idx === activeTabIndex) newActiveIdx = Math.min(idx, nextTabs.length - 1);
+      else if (idx < activeTabIndex) newActiveIdx = activeTabIndex - 1;
+      setActiveTabIndex(newActiveIdx);
+      if (idx === activeTabIndex && nextTabs[newActiveIdx]) {
+        loadNote(nextTabs[newActiveIdx].path);
+      }
+    }
+  };
+
+  const handleDelete = async (e: React.MouseEvent, path: string, is_dir: boolean) => { e.stopPropagation(); const confirmed = await showDialog('confirm', `删除`, { message: `确认要将 "${path}" 放入回收站吗？` }); if (!confirmed) return; try { if (currentFile === path || (currentFile && currentFile.startsWith(path + "/"))) { closeTab(path); editor.replaceBlocks(editor.document, []); setInitialAssetUrls(new Set()); } await invoke("delete_item", { path, isDir: is_dir }); await refreshTree(); } catch (err) { addToast("删除失败: " + err, 'error'); } };
+  const handleRename = async (e: React.MouseEvent, node: FileNode) => { e.stopPropagation(); const newName = await showDialog('prompt', '重命名', { defaultValue: node.name }); if (!newName || newName === node.name) return; const parentDir = node.path.includes("/") ? node.path.substring(0, node.path.lastIndexOf("/")) : ""; const newPath = parentDir ? `${parentDir}/${newName}` : newName; try { await saveCurrentNote(); await invoke("rename_item", { oldPath: node.path, newPath: newPath, isDir: node.is_dir }); await refreshTree(); if (currentFile === node.path) { setTabs(prev => prev.map(t => t.path === node.path ? { ...t, path: newPath, title: newName } : t)); } } catch (err) { addToast("重命名失败: " + err, 'error'); } };
+  const handleCreate = async (type: 'folder' | 'note') => { const name = await showDialog('prompt', type === 'folder' ? "新建文件夹" : "新建笔记", { message: "请输入名称：" }); if (!name) return; const basePath = selectedFolder ? `${selectedFolder}/${name}` : name; try { await saveCurrentNote(); if (type === 'folder') await invoke("create_folder", { path: basePath }); else { await invoke("create_note", { path: basePath }); await loadNote(basePath); } await refreshTree(); } catch (e) { addToast("创建失败: " + e, 'error'); } };
   const handleOpenSettings = () => showDialog('settings', '外观设置', { bgImage, bgOpacity, bgBlur, onSetBgImage: updateBgImage, onSetBgOpacity: (v: number) => { setBgOpacity(v); localStorage.setItem("app_bg_opacity", v.toString()); }, onSetBgBlur: (v: number) => { setBgBlur(v); localStorage.setItem("app_bg_blur", v.toString()); }, onClearBg: clearBg });
 
   const clearBg = async () => { if (bgImage) { try { await invoke("delete_asset", { url: bgImage }); } catch (e) { console.error("Delete bg failed", e); } } setBgImage(null); localStorage.removeItem("app_bg_image"); };
-  const updateBgImage = async (file: File) => { try { const filename = `bg_${new Date().getTime()}_${file.name}`; const payload = Array.from(new Uint8Array(await file.arrayBuffer())); const path = await invoke<string>("save_image", { fileName: filename, payload, notePath: "wallpapers" }); setBgImage(path); localStorage.setItem("app_bg_image", path); } catch (e) { alert("壁纸设置失败: " + e); } };
-  const handleOpenTrash = async () => { try { const items = await invoke<TrashItem[]>("get_trash_items"); await showDialog('trash', '回收站', { trashItems: items, onEmptyTrash: async () => { const confirmed = await showDialog('confirm', '清空回收站', { message: "确定清空回收站吗？此操作不可恢复。" }); if (confirmed) { await invoke("empty_trash"); } handleOpenTrash(); }, onRestore: async (path: string) => { await invoke("restore_trash_item", { fileName: path }); await refreshTree(); handleOpenTrash(); }, onDeleteForever: async (path: string) => { const confirmed = await showDialog('confirm', '永久删除', { message: `确定要永久删除 "${path}" 吗？此操作不可恢复。` }); if (confirmed) { await invoke("delete_trash_item", { fileName: path }); } handleOpenTrash(); } }); } catch(e) { alert("打开回收站失败: " + e); } };
-  const renderTree = (nodes: FileNode[], depth = 0) => { return nodes.map(node => { const isExpanded = expandedFolders.has(node.path) || searchTerm.length > 0; const isSelected = selectedFolder === node.path; return ( <div key={node.path}> <div onClick={() => handleSelect(node)} style={{ padding: "6px 10px", paddingLeft: `${depth * 15 + 10}px`, cursor: "pointer", background: (currentFile === node.path) ? "#e6f7ff" : (isSelected && node.is_dir ? "#f0f0f0" : "transparent"), color: currentFile === node.path ? "#1890ff" : "#333", display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "14px", borderRadius: "4px", marginBottom: "2px", userSelect: "none" }}> <div style={{ display: "flex", alignItems: "center", overflow: "hidden", flex: 1 }}> <span style={{ marginRight: "4px", fontSize: "10px", width: "14px", textAlign: "center", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.1s ease", color: "#999", visibility: node.is_dir ? "visible" : "hidden" }} onClick={(e) => { e.stopPropagation(); if (node.is_dir) toggleFolder(node.path); }}>▶</span> <span style={{ marginRight: "6px", fontSize: "16px" }}>{node.is_dir ? (isExpanded ? "📂" : "📁") : "📄"}</span> <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{node.name}</span> </div> <div style={{ display: "flex", gap: "2px" }}> <button onClick={(e) => handleMove(e, node)} title="移动" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>➜</button> <button onClick={(e) => handleRename(e, node)} title="重命名" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✏️</button> <button onClick={(e) => handleDelete(e, node.path, node.is_dir)} title="删除" style={{ border:"none", background:"transparent", cursor:"pointer", opacity:0.4 }}>✕</button> </div> </div> {node.is_dir && isExpanded && (<div>{node.children && node.children.length > 0 ? renderTree(node.children, depth + 1) : <div style={{ paddingLeft: `${(depth + 1) * 15 + 30}px`, fontSize: "12px", color: "#ccc", padding: "4px 0" }}>(空)</div>}</div>)} </div> ); }); };
+  const updateBgImage = async (file: File) => { try { const filename = `bg_${new Date().getTime()}_${file.name}`; const payload = Array.from(new Uint8Array(await file.arrayBuffer())); const path = await invoke<string>("save_image", { fileName: filename, payload, notePath: "wallpapers" }); setBgImage(path); localStorage.setItem("app_bg_image", path); } catch (e) { addToast("壁纸设置失败: " + e, 'error'); } };
+  const handleOpenTrash = async () => { try { const items = await invoke<TrashItem[]>("get_trash_items"); await showDialog('trash', '回收站', { trashItems: items, onEmptyTrash: async () => { const confirmed = await showDialog('confirm', '清空回收站', { message: "确定清空回收站吗？此操作不可恢复。" }); if (confirmed) { await invoke("empty_trash"); } handleOpenTrash(); }, onRestore: async (path: string) => { await invoke("restore_trash_item", { fileName: path }); await refreshTree(); handleOpenTrash(); }, onDeleteForever: async (path: string) => { const confirmed = await showDialog('confirm', '永久删除', { message: `确定要永久删除 "${path}" 吗？此操作不可恢复。` }); if (confirmed) { await invoke("delete_trash_item", { fileName: path }); } handleOpenTrash(); } }); } catch(e) { addToast("打开回收站失败: " + e, 'error'); } };
+  const showNodeMenu = (e: React.MouseEvent, node: FileNode) => {
+    e.preventDefault(); e.stopPropagation();
+    const menuW = 170, menuH = 220;
+    const x = Math.min(e.clientX, window.innerWidth - menuW);
+    const y = Math.min(e.clientY, window.innerHeight - menuH);
+    setCtxMenu({ x: Math.max(0, x), y: Math.max(0, y), node });
+  };
+  const handleShowInfo = async (node: FileNode) => {
+    setCtxMenu(null);
+    if (node.is_dir) { addToast("文件夹暂无详细信息", 'info'); return; }
+    try {
+      const info = await invoke<any>("get_note_info", { path: node.path });
+      await showDialog('alert', '📋 详细信息', { message: `路径: ${info.path}\n行数: ${info.lines}\n大小: ${(info.size/1024).toFixed(1)} KB\n创建: ${info.created}\n修改: ${info.modified}` });
+    } catch { addToast("获取信息失败", 'error'); }
+  };
+  const toggleFav = (path: string) => {
+    setFavPaths(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      localStorage.setItem("fav_paths", JSON.stringify([...next]));
+      return next;
+    });
+    setCtxMenu(null);
+  };
+
+  const renderTree = (nodes: FileNode[], depth = 0) => nodes.map(node => {
+    const isExpanded = expandedFolders.has(node.path) || searchTerm.length > 0;
+    const isSelected = selectedFolder === node.path;
+    const isFav = favPaths.has(node.path);
+    return (
+      <div key={node.path} onContextMenu={(e) => showNodeMenu(e, node)}>
+        <div onClick={() => handleSelect(node)}
+          style={{ padding: "5px 8px", paddingLeft: `${depth*14+8}px`, cursor:"pointer",
+            background: currentFile===node.path?"#e6f7ff":(isSelected&&node.is_dir?"#f0f0f0":"transparent"),
+            color: currentFile===node.path?"#1890ff":"#333", display:"flex", justifyContent:"space-between",
+            alignItems:"center", fontSize:"13px", borderRadius:"4px", marginBottom:"1px", userSelect:"none" }}
+          onMouseEnter={(e) => { if (currentFile!==node.path) e.currentTarget.style.background="#f5f5f5"; }}
+          onMouseLeave={(e) => { if (currentFile!==node.path && !isSelected) e.currentTarget.style.background="transparent"; }}>
+          <div style={{ display:"flex", alignItems:"center", overflow:"hidden", flex:1 }}>
+            <span style={{ marginRight:"4px", fontSize:"10px", width:"14px", textAlign:"center", transform:isExpanded?"rotate(90deg)":"rotate(0deg)", transition:"transform 0.1s", color:"#999", visibility:node.is_dir?"visible":"hidden" }}
+              onClick={(e) => { e.stopPropagation(); if(node.is_dir) toggleFolder(node.path); }}>▶</span>
+            {isFav && <span style={{ fontSize:"11px", marginRight:"2px" }}>⭐</span>}
+            <span style={{ marginRight:"5px", fontSize:"15px" }}>{node.is_dir?(isExpanded?"📂":"📁"):"📄"}</span>
+            <span style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{node.name}</span>
+          </div>
+          <span onClick={(e) => showNodeMenu(e, node)}
+            style={{ fontSize:"16px", cursor:"pointer", opacity:0.35, padding:"0 4px", borderRadius:"3px", lineHeight:1 }}
+            onMouseEnter={(e) => e.currentTarget.style.opacity="0.8"}
+            onMouseLeave={(e) => e.currentTarget.style.opacity="0.35"}
+            title="更多操作">…</span>
+        </div>
+        {node.is_dir && isExpanded && (
+          <div>{node.children&&node.children.length>0?renderTree(node.children,depth+1):
+            <div style={{ paddingLeft:`${(depth+1)*14+30}px`, fontSize:"11px", color:"#ccc", padding:"3px 0" }}>(空)</div>}</div>
+        )}
+      </div>
+    );
+  });
   const handleExportPdf = () => { window.print(); };
 
   // 🔥 Word 导出逻辑
@@ -1074,12 +597,12 @@ function App() {
       if (path) {
         await writeFile(path, uint8Array);
         setStatus("导出成功");
-        alert("导出 Word 成功！");
+        addToast("导出 Word 成功！", 'success');
       }
     } catch (e) {
       console.error(e);
       setStatus("导出失败");
-      alert("导出 Word 失败: " + e);
+      addToast("导出 Word 失败: " + e, 'error');
     }
   };
   
@@ -1142,55 +665,249 @@ function App() {
       
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 0, backgroundImage: bgImage ? `url(${convertFileSrc(bgImage)})` : "none", backgroundSize: "cover", backgroundPosition: "center", backgroundColor: "#fff" }} className="no-print" />
       <CustomDialog {...dialogState} onConfirm={(val) => dialogState.resolve(val)} onCancel={() => dialogState.resolve(null)} bgImage={bgImage} bgOpacity={bgOpacity} bgBlur={bgBlur} onClearBg={clearBg} onSetBgImage={updateBgImage} onSetBgOpacity={(v) => { setBgOpacity(v); localStorage.setItem("app_bg_opacity", v.toString()); }} onSetBgBlur={(v) => { setBgBlur(v); localStorage.setItem("app_bg_blur", v.toString()); }} />
-      
-      {/* 侧边栏 */}
-      <div className="no-print" onClick={handleBackgroundClick} style={{ width: isSidebarOpen ? sidebarWidth : 0, borderRight: isSidebarOpen ? "1px solid rgba(0,0,0,0.1)" : "none", background: `rgba(249, 249, 249, ${Math.max(0.6, bgOpacity - 0.1)})`, backdropFilter: `blur(${bgBlur}px)`, display: "flex", flexDirection: "column", overflow: "hidden", transition: isResizing ? "none" : "width 0.2s", zIndex: 1 }}>
-        <div style={{ padding: "15px", fontWeight: "bold", borderBottom: "1px solid rgba(0,0,0,0.05)", whiteSpace:"nowrap", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          <span>🗂️ 无聊的产品线No.1</span>
-          <button onClick={handleOpenSettings} title="设置" style={{ background:"transparent", border:"none", cursor:"pointer", fontSize:"16px", opacity: 0.6 }}>⚙️</button>
+
+      {/* Global Search Panel (Ctrl+Shift+F) */}
+      {searchOpen && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: "10vh", zIndex: 2147483646 }} onClick={() => setSearchOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: "720px", maxHeight: "78vh", borderRadius: "14px", boxShadow: "0 24px 48px rgba(0,0,0,0.18)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ display: "flex", gap: "10px", padding: "18px 22px", borderBottom: "1px solid #f0f0f0", background: "#fafbfc" }}>
+              <div style={{ flex: 1, position: "relative" }}>
+                <span style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", fontSize: "14px", color: "#bbb", pointerEvents: "none" }}>🔎</span>
+                <input autoFocus type="text" placeholder="搜索所有笔记内容..." value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Escape') { setSearchOpen(false); }
+                    if (e.key === 'Enter') {
+                      if (!searchQuery) return;
+                      setSearching(true);
+                      try { const results = await invoke<any[]>("search_notes", { query: searchQuery }); setSearchResults(results); }
+                      catch (err) { console.error(err); }
+                      finally { setSearching(false); }
+                    }
+                  }}
+                  style={{ width: "100%", padding: "9px 12px 9px 32px", border: "1px solid #e0e0e0", borderRadius: "8px", fontSize: "14px", outline: "none", boxSizing: "border-box", transition: "border-color 0.15s" }}
+                  onFocus={(e) => e.target.style.borderColor = "#1890ff"}
+                  onBlur={(e) => e.target.style.borderColor = "#e0e0e0"} />
+              </div>
+              <button onClick={async () => {
+                if (!searchQuery) return;
+                setSearching(true);
+                try { const results = await invoke<any[]>("search_notes", { query: searchQuery }); setSearchResults(results); }
+                catch (err) { console.error(err); }
+                finally { setSearching(false); }
+              }} style={{ padding: "9px 20px", background: "#1890ff", color: "white", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: 500, whiteSpace: "nowrap" }}>搜索</button>
+            </div>
+            {searchResults.length > 0 && (
+              <div style={{ display: "flex", gap: "8px", padding: "8px 20px", borderBottom: "1px solid #eee", background: "#fafafa", alignItems: "center" }}>
+                <span style={{ fontSize: "12px", color: "#999", whiteSpace: "nowrap" }}>替换为:</span>
+                <input type="text" value={searchReplace} onChange={(e) => setSearchReplace(e.target.value)}
+                  style={{ flex: 1, padding: "5px 10px", border: "1px solid #e0e0e0", borderRadius: "4px", fontSize: "13px", outline: "none" }} />
+                <span style={{ fontSize: "11px", color: "#bbb", whiteSpace: "nowrap" }}>点击文件旁的按钮替换</span>
+              </div>
+            )}
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px" }}>
+              {searching ? (
+                <div style={{ padding: "60px", textAlign: "center", color: "#bbb", fontSize: "14px" }}>搜索中...</div>
+              ) : searchResults.length === 0 ? (
+                <div style={{ padding: "60px", textAlign: "center", color: "#ccc", fontSize: "14px" }}>{searchQuery ? '没有找到匹配结果' : '输入关键词后按 Enter 开始搜索'}</div>
+              ) : (
+                (() => {
+                  const grouped: Record<string, typeof searchResults> = {};
+                  for (const r of searchResults) { (grouped[r.path] ??= []).push(r); }
+                  return Object.entries(grouped).map(([path, items]) => (
+                    <div key={path} style={{ marginBottom: "8px", border: "1px solid #f0f0f0", borderRadius: "8px", overflow: "hidden" }}>
+                      <div style={{ display: "flex", alignItems: "center", padding: "8px 12px", background: "#fafbfc", borderBottom: "1px solid #f0f0f0" }}>
+                        <div onClick={() => { loadNote(path); setSearchOpen(false); }}
+                          style={{ fontWeight: 600, fontSize: "13px", color: "#1890ff", cursor: "pointer", flex: 1, borderRadius: "4px", padding: "2px 4px", margin: "-2px -4px" }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f0f5ff"}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}>
+                          📄 {path}
+                        </div>
+                        <span style={{ fontSize: "11px", color: "#999", marginRight: "8px" }}>{items.length} 处</span>
+                        <button onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!searchReplace && !confirm('替换文本为空，将删除匹配内容。继续？')) return;
+                          const content = await invoke<string>("load_note", { path });
+                          let newContent = content;
+                          let count = 0;
+                          newContent = newContent.replace(new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), () => { count++; return searchReplace; });
+                          await invoke("save_note", { path, content: newContent });
+                          addToast(`在「${path}」中替换了 ${count} 处`, 'success');
+                          setSearchResults(prev => prev.filter(r => r.path !== path));
+                        }}
+                          style={{ padding: "3px 10px", background: "#fff", color: "#ff4d4f", border: "1px solid #ffccc7", borderRadius: "4px", cursor: "pointer", fontSize: "11px", whiteSpace: "nowrap" }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "#fff1f0"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = "#fff"; }}>
+                          替换
+                        </button>
+                      </div>
+                      {items.map((r, i) => (
+                        <div key={i} onClick={() => { loadNote(path); setSearchOpen(false); }}
+                          style={{ padding: "3px 16px", cursor: "pointer", fontSize: "12px", color: "#555", display: "flex", gap: "8px", borderBottom: i < items.length - 1 ? "1px solid #fafafa" : "none" }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "#f9fafb"}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}>
+                          <span style={{ color: "#bbb", minWidth: "28px", fontSize: "11px", fontFamily: "monospace" }}>L{r.line}</span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "monospace" }}>{r.content}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ));
+                })()
+              )}
+            </div>
+            <div style={{ padding: "8px 20px", borderTop: "1px solid #f0f0f0", fontSize: "11px", color: "#bbb", display: "flex", justifyContent: "space-between", background: "#fafbfc" }}>
+              <span>{searchResults.length > 0 ? `共 ${searchResults.length} 条匹配` : ''}</span>
+              <span>Esc 关闭</span>
+            </div>
+          </div>
         </div>
-        <div style={{ padding: "0 10px 10px 10px", borderBottom: "1px solid rgba(0,0,0,0.05)" }}><input type="text" placeholder="🔍 搜索..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={{ width: "100%", padding: "6px 8px", borderRadius: "4px", border: "1px solid #ddd", fontSize: "12px", boxSizing: "border-box", background: "rgba(255,255,255,0.8)" }} /></div>
-        <div style={{ flex: 1, overflow: "auto", padding: "10px 0" }} onClick={handleBackgroundClick}>{renderTree(displayedTree)}</div>
-        <div style={{ padding: "10px 15px", cursor:"pointer", borderTop: "1px solid rgba(0,0,0,0.05)", fontSize:"13px", color:"#666", display:"flex", alignItems:"center", gap:"6px" }} onClick={handleOpenTrash}><span>🗑️ 回收站</span></div>
-        <div style={{ padding: "10px", borderTop: "1px solid rgba(0,0,0,0.05)", background: "rgba(255,255,255,0.4)" }}>
-          <div style={{ display: "flex", gap: "5px", marginBottom: "10px" }}>
-            <button onClick={() => handleCreate('folder')} style={{ flex: 1, padding: "8px", border: "1px solid #ddd", background: "rgba(255,255,255,0.8)", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>+ 文件夹</button>
-            <button onClick={() => handleCreate('note')} style={{ flex: 1, padding: "8px", border: "none", background: "#1890ff", color: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px" }}>+ 笔记</button>
+      )}
+
+      {/* 侧边栏 */}
+      {!isFocusMode && <>
+      <div className="no-print" onClick={handleBackgroundClick} style={{ width: isSidebarOpen ? sidebarWidth : 0, borderRight: isSidebarOpen ? "1px solid rgba(0,0,0,0.1)" : "none", background: `rgba(249, 249, 249, ${Math.max(0.6, bgOpacity - 0.1)})`, backdropFilter: `blur(${bgBlur}px)`, display: "flex", flexDirection: "column", overflow: "hidden", transition: isResizing ? "none" : "width 0.2s", zIndex: 1 }}>
+        <div style={{ padding: "14px 16px", fontWeight: 700, borderBottom: "1px solid #e8eaed", whiteSpace:"nowrap", display:"flex", justifyContent:"space-between", alignItems:"center", background: "#fafbfc", letterSpacing: "-0.3px" }}>
+          <span style={{ fontSize: "14px", color: "#1a1a1a" }}>🗂️ No.1</span>
+          <div style={{ display:"flex", gap:"2px" }}>
+            <button onClick={() => setShortcutPanel(true)} title="快捷键 (?)"
+              style={{ background:"transparent", border:"none", cursor:"pointer", fontSize:"13px", color:"#999", padding:"4px 7px", borderRadius:"5px", transition:"all 0.15s", fontWeight:600 }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "#e8eaed"; e.currentTarget.style.color = "#555"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#999"; }}>?</button>
+            <button onClick={handleOpenSettings} title="设置"
+              style={{ background:"transparent", border:"none", cursor:"pointer", fontSize:"15px", color:"#999", padding:"4px 7px", borderRadius:"5px", transition:"all 0.15s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "#e8eaed"; e.currentTarget.style.color = "#555"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#999"; }}>⚙️</button>
+          </div>
+        </div>
+        {/* Favorites section */}
+        {[...favPaths].length > 0 && (
+          <div style={{ padding: "4px 8px", borderBottom: "1px solid rgba(0,0,0,0.05)", background: "#fefce8" }}>
+            <div style={{ fontSize: "10px", color: "#b45309", fontWeight: 600, marginBottom: "2px", paddingLeft: "4px" }}>⭐ 收藏</div>
+            {[...favPaths].map(p => (
+              <div key={p} onClick={() => loadNote(p)}
+                style={{ padding: "3px 8px", cursor: "pointer", fontSize: "12px", color: "#333", borderRadius: "4px", display: "flex", alignItems: "center", gap: "6px" }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "#fef3c7"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
+                <span>📄</span><span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p}</span>
+                <span onClick={(e) => { e.stopPropagation(); toggleFav(p); }}
+                  style={{ marginLeft:"auto", fontSize:"12px", opacity:0.5, cursor:"pointer" }}>✕</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ padding: "0 10px 10px 10px", borderBottom: "1px solid rgba(0,0,0,0.05)" }}><input ref={sidebarSearchRef} type="text" placeholder="🔍 搜索... (Ctrl+K)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const flat = filterNodes(fileTree, searchTerm).flatMap(n => n.is_dir ? [] : [n.path]);
+                    if (flat.length >= 1) loadNote(flat[0]);
+                  }
+                }}
+                style={{ width: "100%", padding: "6px 8px", borderRadius: "4px", border: "1px solid #ddd", fontSize: "12px", boxSizing: "border-box", background: "rgba(255,255,255,0.8)" }} /></div>
+        <div style={{ flex: 1, overflow: "auto", padding: "8px 4px" }} onClick={handleBackgroundClick}>{renderTree(displayedTree)}</div>
+        <div style={{ padding: "8px 16px", cursor:"pointer", borderTop: "1px solid #e8eaed", fontSize:"12px", color:"#888", display:"flex", alignItems:"center", gap:"6px", transition: "all 0.15s" }}
+          onMouseEnter={(e) => e.currentTarget.style.background = "#f5f5f5"}
+          onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+          onClick={handleOpenTrash}><span>🗑️</span><span>回收站</span></div>
+        <div style={{ padding: "8px 12px", borderTop: "1px solid #e8eaed", background: "#fafbfc" }}>
+          <div style={{ display: "flex", gap: "6px" }}>
+            <button onClick={() => handleCreate('folder')}
+              style={{ flex: 1, padding: "7px", border: "1px solid #e0e0e0", background: "white", borderRadius: "6px", cursor: "pointer", fontSize: "12px", color: "#666", transition: "all 0.15s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#1890ff"; e.currentTarget.style.color = "#1890ff"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#e0e0e0"; e.currentTarget.style.color = "#666"; }}>
+              + 文件夹
+            </button>
+            <button onClick={() => handleCreate('note')}
+              style={{ flex: 1, padding: "7px", border: "none", background: "#1890ff", color: "white", borderRadius: "6px", cursor: "pointer", fontSize: "12px", fontWeight: 500, transition: "all 0.15s" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "#40a9ff"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "#1890ff"}>
+              + 笔记</button>
           </div>
         </div>
       </div>
 
       {isSidebarOpen && <div className="no-print" onMouseDown={startResizing} style={{ width: "4px", cursor: "col-resize", background: "transparent", zIndex: 10, marginLeft: "-2px" }} />}
+      </>}
       
       {/* 主内容区域 */}
       <div className="print-content" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", zIndex: 1, position: "relative" }}>
         
+        {/* Tab 栏 */}
+        {!isFocusMode && tabs.length > 0 && (
+          <div className="no-print" style={{ display: "flex", background: "#f8f9fa", borderBottom: "1px solid #e8eaed", overflowX: "auto", flexShrink: 0, padding: "0 4px" }}>
+            {tabs.map((tab, i) => (
+              <div key={tab.path} onClick={() => { if (i !== activeTabIndex) loadNote(tab.path); }}
+                style={{
+                  padding: "7px 14px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", gap: "7px",
+                  whiteSpace: "nowrap", transition: "all 0.12s",
+                  background: i === activeTabIndex ? "#fff" : "transparent",
+                  color: i === activeTabIndex ? "#1890ff" : "#5f6368",
+                  fontWeight: i === activeTabIndex ? 600 : 400,
+                  borderBottom: i === activeTabIndex ? "2px solid #1890ff" : "2px solid transparent",
+                  borderRight: "1px solid transparent",
+                  borderRadius: "4px 4px 0 0", marginTop: "3px",
+                  minWidth: 0
+                }}
+                onMouseEnter={(e) => { if (i !== activeTabIndex) { e.currentTarget.style.background = "#eef1f5"; e.currentTarget.style.color = "#333"; } }}
+                onMouseLeave={(e) => { if (i !== activeTabIndex) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "#5f6368"; } }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", maxWidth: "130px" }}>{tab.title}</span>
+                {tab.isDirty && <span style={{ color: "#faad14", fontSize: "11px" }}>●</span>}
+                <span onClick={(e) => { e.stopPropagation(); closeTab(tab.path); }}
+                  style={{ fontSize: "13px", opacity: 0.35, cursor: "pointer", padding: "0 3px", borderRadius: "3px", lineHeight: 1 }}
+                  onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.8"; e.currentTarget.style.background = "#e0e0e0"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.35"; e.currentTarget.style.background = "transparent"; }}
+                  title="关闭">✕</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* 顶部栏 */}
-        <div className="no-print" style={{ padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
+        {!isFocusMode && <div className="no-print" style={{ padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.05)", display: "flex", justifyContent: "space-between", alignItems: "center", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
           <div style={{display: 'flex', alignItems: 'center'}}>
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={{ border: "none", background: "transparent", cursor: "pointer", marginRight: "10px" }}>{isSidebarOpen ? "◀" : "▶"}</button>
+            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              style={{ border: "none", background: "transparent", cursor: "pointer", marginRight: "8px", fontSize: "14px", color: "#888", width: "28px", height: "28px", borderRadius: "6px", display: "flex", alignItems: "center", justifyContent: "center" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+            >{isSidebarOpen ? "◀" : "▶"}</button>
             {/* 目录切换按钮 */}
             {currentFile && (
-                <button 
-                    onClick={() => setIsTocOpen(!isTocOpen)} 
+                <button
+                    onClick={() => setIsTocOpen(!isTocOpen)}
                     title={isTocOpen ? "收起大纲" : "展开大纲"}
-                    style={{ 
-                        border: "1px solid #eee", 
-                        background: isTocOpen ? "#e6f7ff" : "white", 
-                        color: isTocOpen ? "#1890ff" : "#666",
-                        cursor: "pointer", 
-                        borderRadius: "4px",
-                        padding: "2px 6px",
-                        fontSize: "12px",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "4px",
-                        marginRight: "15px"
+                    style={{
+                        border: "1px solid #e0e0e0",
+                        background: isTocOpen ? "#e6f7ff" : "white",
+                        color: isTocOpen ? "#1890ff" : "#888",
+                        cursor: "pointer", borderRadius: "6px", padding: "3px 10px",
+                        fontSize: "12px", display: "flex", alignItems: "center", gap: "5px",
+                        marginRight: "8px", transition: "all 0.15s"
                     }}
                 >
                     <span>{isTocOpen ? "📖" : "📘"}</span>
                     <span>大纲</span>
                 </button>
+            )}
+            {/* 全局搜索按钮 */}
+            <button onClick={() => { setSearchOpen(true); setSearchQuery(""); setSearchResults([]); }}
+              title="全局搜索替换 (Ctrl+Shift+F)"
+              style={{ border: "1px solid #e0e0e0", background: "white", cursor: "pointer", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", color: "#888", display: "flex", alignItems: "center", gap: "5px", marginRight: "8px", transition: "all 0.15s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#1890ff"; e.currentTarget.style.color = "#1890ff"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#e0e0e0"; e.currentTarget.style.color = "#888"; }}>
+              <span>🔎</span><span>搜索替换</span>
+            </button>
+            {/* 阅读模式 */}
+            {currentFile && (
+              <button onClick={() => setIsReadMode(!isReadMode)} title={isReadMode ? "编辑模式" : "阅读模式"}
+                style={{ border: "1px solid #e0e0e0", background: isReadMode ? "#e6f7ff" : "white", cursor: "pointer", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", color: isReadMode ? "#1677ff" : "#888", display: "flex", alignItems: "center", gap: "5px", marginRight: "8px", transition: "all 0.15s" }}>
+                <span>{isReadMode ? "✏️" : "📖"}</span>
+              </button>
+            )}
+            {/* 聚焦模式 */}
+            {currentFile && (
+              <button onClick={() => setIsFocusMode(!isFocusMode)} title="聚焦模式 (Ctrl+Shift+D)"
+                style={{ border: "1px solid #e0e0e0", background: isFocusMode ? "#e6f7ff" : "white", cursor: "pointer", borderRadius: "6px", padding: "3px 10px", fontSize: "12px", color: isFocusMode ? "#1677ff" : "#888", display: "flex", alignItems: "center", gap: "5px", marginRight: "8px", transition: "all 0.15s" }}>
+                <span>⛶</span>
+              </button>
             )}
             {currentFile && (
                 <span style={{ fontSize: "12px", color: "#999", transition: "opacity 0.3s" }}>
@@ -1199,8 +916,16 @@ function App() {
             )}
           </div>
           
-          <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
-            <span style={{ fontSize: "12px", color: status === "● 未保存" ? "#faad14" : "#888", fontWeight: status === "● 未保存" ? "bold" : "normal" }}>{status}</span>
+          <div style={{ display:"flex", alignItems:"center", gap:"6px" }}>
+            <button onClick={() => editor.undo()} title="撤销 (Ctrl+Z)"
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "14px", color: "#888", padding: "2px 4px", borderRadius: "4px" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>↩</button>
+            <button onClick={() => editor.redo()} title="重做 (Ctrl+Shift+Z)"
+              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: "14px", color: "#888", padding: "2px 4px", borderRadius: "4px", marginRight: "4px" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "#f0f0f0"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>↪</button>
+            <span style={{ fontSize: "12px", color: (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) ? "#faad14" : "#888", fontWeight: (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) ? "bold" : "normal" }}>{status}</span>
             {currentFile && (
               <div style={{ display: 'flex', gap: '5px', marginRight: '10px' }}>
                 <button onClick={handleExportWord} title="导出为 Word" style={{ padding: "4px 8px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center", gap: "4px" }}><span>📝</span> Word</button>
@@ -1209,8 +934,18 @@ function App() {
             )}
             <button onClick={saveCurrentNote} title="保存 (Ctrl+S)" style={{ padding: "4px 10px", border: "1px solid #ddd", background: "white", borderRadius: "4px", cursor: "pointer", fontSize: "12px", display: "flex", alignItems: "center" }}>💾 保存</button>
           </div>
-        </div>
-        
+        </div>}
+
+        {/* 聚焦模式浮动退出按钮 */}
+        {isFocusMode && (
+          <div className="no-print" style={{ position: "absolute", top: "12px", right: "16px", zIndex: 100, display: "flex", gap: "6px" }}>
+            <button onClick={() => setIsFocusMode(false)} title="退出聚焦 (Ctrl+Shift+D)"
+              style={{ padding: "6px 12px", background: "rgba(0,0,0,0.06)", border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "13px", color: "#666", backdropFilter: "blur(8px)" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "rgba(0,0,0,0.1)"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "rgba(0,0,0,0.06)"}>✕ 退出聚焦</button>
+          </div>
+        )}
+
         {/* 内容容器：左侧目录 + 右侧编辑器 */}
         <div style={{ flex: 1, display: "flex", overflow: "hidden", background: `rgba(255, 255, 255, ${bgOpacity})`, backdropFilter: `blur(${bgBlur}px)` }}>
             
@@ -1257,15 +992,57 @@ function App() {
             </div>
 
             {/* 编辑器滚动区域 */}
-            <div style={{ 
-                flex: 1, 
-                overflow: "auto", 
-                padding: "40px 60px", 
+            <div style={{
+                flex: 1,
+                overflow: "auto",
+                padding: "40px 60px",
                 paddingBottom: "50vh",
-                transition: "padding 0.3s ease" // 编辑器区域也平滑过渡
-            }}>
+                transition: "padding 0.3s ease"
+            }} onBlur={() => { if (activeTabIndex >= 0 && tabs[activeTabIndex]?.isDirty) saveCurrentNote(); }}>
+              {/* Inline search bar (Ctrl+F) */}
+              {inlineSearch.open && (
+                <div className="no-print" style={{ marginBottom: "12px", display: "flex", gap: "8px", alignItems: "center", padding: "8px 12px", background: "#fafbfc", borderRadius: "8px", border: "1px solid #e0e0e0" }}>
+                  <input id="inline-search-input" autoFocus type="text" placeholder="笔记内搜索..." value={inlineSearch.query}
+                    onChange={(e) => {
+                      const q = e.target.value;
+                      const results: {blockId:string;text:string}[] = [];
+                      editor.document.forEach((b:any) => {
+                        const text = b.content?.map((c:any)=>c.text||'').join('') || '';
+                        if (text.toLowerCase().includes(q.toLowerCase())) results.push({blockId:b.id, text});
+                      });
+                      setInlineSearch(prev=>({...prev, query: q, results, idx: results.length>0?0:-1}));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key==='Escape') setInlineSearch(prev=>({...prev,open:false}));
+                      if (e.key==='Enter') {
+                        const r = inlineSearch.results[inlineSearch.idx];
+                        if (r) { const el = document.querySelector(`[data-id="${r.blockId}"]`); if (el) el.scrollIntoView({behavior:"smooth",block:"center"}); }
+                        setInlineSearch(prev=>({...prev, idx: Math.min(prev.idx+1, prev.results.length-1)}));
+                      }
+                    }}
+                    style={{ flex:1, padding:"6px 10px", border:"1px solid #e0e0e0", borderRadius:"6px", fontSize:"13px", outline:"none" }} />
+                  <span style={{ fontSize:"12px", color:"#999", whiteSpace:"nowrap" }}>
+                    {inlineSearch.results.length>0 ? `${inlineSearch.idx+1}/${inlineSearch.results.length}` : '无匹配'}
+                  </span>
+                  <button onClick={() => {
+                    if (inlineSearch.results.length===0) return;
+                    const ni = inlineSearch.idx>0 ? inlineSearch.idx-1 : inlineSearch.results.length-1;
+                    setInlineSearch(prev=>({...prev, idx: ni}));
+                    const r = inlineSearch.results[ni];
+                    if (r) { const el = document.querySelector(`[data-id="${r.blockId}"]`); if (el) el.scrollIntoView({behavior:"smooth",block:"center"}); }
+                  }} style={{ border:"1px solid #e0e0e0", background:"white", borderRadius:"4px", cursor:"pointer", padding:"4px 8px", fontSize:"12px" }}>↑</button>
+                  <button onClick={() => {
+                    if (inlineSearch.results.length===0) return;
+                    const ni = (inlineSearch.idx+1) % inlineSearch.results.length;
+                    setInlineSearch(prev=>({...prev, idx: ni}));
+                    const r = inlineSearch.results[ni];
+                    if (r) { const el = document.querySelector(`[data-id="${r.blockId}"]`); if (el) el.scrollIntoView({behavior:"smooth",block:"center"}); }
+                  }} style={{ border:"1px solid #e0e0e0", background:"white", borderRadius:"4px", cursor:"pointer", padding:"4px 8px", fontSize:"12px" }}>↓</button>
+                  <button onClick={() => setInlineSearch(prev=>({...prev, open:false}))} style={{ border:"none", background:"transparent", cursor:"pointer", fontSize:"14px", color:"#999" }}>✕</button>
+                </div>
+              )}
               {currentFile ? (
-                 <BlockNoteView key={currentFile} editor={editor} onChange={onEditorChange} theme="light" slashMenu={false}>
+                 <BlockNoteView key={currentFile} editor={editor} onChange={onEditorChange} theme="light" slashMenu={false} editable={!isReadMode}>
                     <SuggestionMenuController triggerCharacter={"/"} getItems={async (query) => { 
                         const defaultItems = getDefaultReactSlashMenuItems(editor); 
                         const filteredDefaultItems = defaultItems.filter(i => i.title !== "Code Block");
@@ -1320,13 +1097,89 @@ function App() {
                             icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>1️⃣</div>,
                             subtext: "从指定数字开始的编号列表"
                         };
-                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem, customNumberedList], query); 
+                        const calloutItem = {
+                            title: "提示框 (Callout)",
+                            onItemClick: () => {
+                                const calloutBlock = { type: "callout" as const, props: { calloutType: "info", title: "" }, content: [] };
+                                insertOrReplaceBlock(editor, calloutBlock);
+                            },
+                            aliases: ["callout", "ts", "info", "warning", "error", "tip"], group: "Media",
+                            icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>💡</div>,
+                            subtext: "插入彩色提示框（信息/警告/错误/提示）"
+                        };
+                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem, customNumberedList, calloutItem], query); 
                     }} />
                  </BlockNoteView>
               ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}
             </div>
         </div>
       </div>
+
+      {/* Context menu */}
+      {ctxMenu && (
+        <div style={{ position: "fixed", left: ctxMenu.x, top: ctxMenu.y, zIndex: 2147483646, background: "white", borderRadius: "8px", boxShadow: "0 8px 24px rgba(0,0,0,0.15)", border: "1px solid #f0f0f0", minWidth: "160px", padding: "4px" }}
+          onClick={(e) => e.stopPropagation()}>
+          {!ctxMenu.node.is_dir && [
+            { label: "📋 详细信息", action: () => handleShowInfo(ctxMenu.node) },
+            { label: "⭐ " + (favPaths.has(ctxMenu.node.path)?"取消收藏":"收藏"), action: () => toggleFav(ctxMenu.node.path) },
+          ].map(item => (
+            <div key={item.label} onClick={item.action}
+              style={{ padding: "8px 12px", fontSize: "13px", cursor: "pointer", borderRadius: "4px", color: "#333" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "#f5f5f5"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>{item.label}</div>
+          ))}
+          {[
+            { label: "✏️ 重命名", action: () => { setCtxMenu(null); handleRename({stopPropagation:()=>{}} as any, ctxMenu.node); } },
+            { label: "➜ 移动到...", action: () => { setCtxMenu(null); handleMove({stopPropagation:()=>{}} as any, ctxMenu.node); } },
+          ].map(item => (
+            <div key={item.label} onClick={item.action}
+              style={{ padding: "8px 12px", fontSize: "13px", cursor: "pointer", borderRadius: "4px", color: "#333" }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "#f5f5f5"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>{item.label}</div>
+          ))}
+          <div style={{ height: "1px", background: "#f0f0f0", margin: "2px 0" }} />
+          <div onClick={() => { setCtxMenu(null); handleDelete({stopPropagation:()=>{}} as any, ctxMenu.node.path, ctxMenu.node.is_dir); }}
+            style={{ padding: "8px 12px", fontSize: "13px", cursor: "pointer", borderRadius: "4px", color: "#ff4d4f" }}
+            onMouseEnter={(e) => e.currentTarget.style.background = "#fff1f0"}
+            onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>🗑️ 删除</div>
+        </div>
+      )}
+
+      {/* Toast notifications */}
+      <div style={{ position: "fixed", bottom: "24px", right: "24px", zIndex: 2147483647, display: "flex", flexDirection: "column", gap: "8px", pointerEvents: "none" }}>
+        {toasts.map(t => (
+          <div key={t.id} style={{
+            padding: "10px 18px", borderRadius: "8px", fontSize: "13px", fontWeight: 500, pointerEvents: "auto",
+            color: "#fff", boxShadow: "0 4px 12px rgba(0,0,0,0.15)", animation: "toastIn 0.2s ease",
+            background: t.type === 'error' ? '#ff4d4f' : t.type === 'success' ? '#52c41a' : '#1890ff'
+          }}>{t.msg}</div>
+        ))}
+      </div>
+
+      {/* Shortcut panel (?) */}
+      {shortcutPanel && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2147483647 }} onClick={() => setShortcutPanel(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: "480px", borderRadius: "14px", boxShadow: "0 24px 48px rgba(0,0,0,0.18)", padding: "28px 32px" }}>
+            <h3 style={{ margin: "0 0 20px 0", fontSize: "16px" }}>⌨️ 快捷键</h3>
+            {[
+              ["Ctrl+S", "保存当前笔记"],
+              ["Ctrl+K", "聚焦侧边栏搜索"],
+              ["Ctrl+F", "笔记内搜索定位"],
+              ["Ctrl+Shift+F", "全局搜索替换"],
+              ["Ctrl+Shift+D", "聚焦模式"],
+              ["Ctrl+Z", "撤销 / Ctrl+Shift+Z 重做"],
+              ["[[", "Wiki 链接（插入笔记引用）"],
+              ["Esc", "关闭当前面板"],
+              ["?", "显示此快捷键面板"],
+            ].map(([key, desc]) => (
+              <div key={key} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #f5f5f5", fontSize: "13px" }}>
+                <span style={{ fontFamily: "monospace", fontWeight: 600, color: "#1890ff", fontSize: "12px" }}>{key}</span>
+                <span style={{ color: "#666" }}>{desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
