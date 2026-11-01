@@ -8,6 +8,14 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.tools/
+artifacts/
+/data/
+.claude/
+.codex/
+.env
+.env.*
+!.env.example
 dist
 dist-ssr
 *.local

@@ -50,7 +50,7 @@ const CustomDialog = (props: DialogProps) => {
 
   return (
     <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0, 0, 0, 0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2147483647 }} onClick={onCancel}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: (type === 'settings' || type === 'trash') ? "500px" : "350px", borderRadius: "12px", boxShadow: "0 10px 25px rgba(0,0,0,0.1)", padding: "24px", display: "flex", flexDirection: "column", maxHeight: "85vh", animation: "popIn 0.2s ease" }}>
+      <div role="dialog" aria-modal="true" aria-label={title} onClick={(e) => e.stopPropagation()} onKeyDown={event=>{event.stopPropagation();if(event.key==="Escape"){event.preventDefault();onCancel();}}} style={{ background: "white", width: (type === 'settings' || type === 'trash') ? "500px" : "350px", maxWidth:"94vw", borderRadius: "12px", boxShadow: "0 10px 25px rgba(0,0,0,0.1)", padding: "24px", display: "flex", flexDirection: "column", maxHeight: "85vh", animation: "popIn 0.2s ease" }}>
         <h3 style={{ margin: "0 0 10px 0", fontSize: "18px", color: "#333", borderBottom: "1px solid #eee", paddingBottom: "10px", display: "flex", justifyContent: "space-between" }}>
           {title}
           {type === 'trash' && <button onClick={onEmptyTrash} style={{ fontSize: "12px", color: "#ff4d4f", background: "transparent", border: "none", cursor: "pointer" }}>🗑️ 清空所有</button>}

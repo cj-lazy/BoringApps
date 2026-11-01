@@ -1,38 +1,43 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { defaultProps } from "@blocknote/core";
 import { createReactBlockSpec } from "@blocknote/react";
 import { invoke } from "@tauri-apps/api/core";
-import mammoth from "mammoth";
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { getFileType } from "../utils/fileType";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+import { runPreview, previewText } from "../utils/previewQueue";
 
 export const fileBlockSchema = {
   type: "file" as const,
   propSchema: { ...defaultProps, name: { default: "Unknown File" }, url: { default: "" }, },
   content: "none" as const,
-  toExternalHTML: (block: any) => {
-    const div = document.createElement("div");
-    const link = document.createElement("a");
-    link.href = block.props.url;
-    link.innerText = `[附件: ${block.props.name}]`;
-    link.style.color = "#1890ff";
-    div.appendChild(link);
-    return { dom: div };
-  }
 };
 
 export const FileBlock = createReactBlockSpec(fileBlockSchema, {
+  toExternalHTML: ({ block }) => <p><a href={block.props.url}>[附件: {block.props.name}]</a></p>,
   render: ({ block }) => {
     const { name, url } = block.props;
     const [preview, setPreview] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [isExpanded, setIsExpanded] = useState(true);
+    const host = useRef<HTMLDivElement>(null);
+    const [visible, setVisible] = useState(typeof document !== "undefined" && document.documentElement.dataset.preparingPrint === "true");
     const fileType = getFileType(name || '');
+    useEffect(() => {
+      const prepare=()=>{setVisible(true);setIsExpanded(true);};
+      window.addEventListener("prepare-note-print",prepare);
+      return()=>window.removeEventListener("prepare-note-print",prepare);
+    },[]);
+    useEffect(() => {
+      if (!host.current || typeof IntersectionObserver === "undefined") { setVisible(true); return; }
+      const observer = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+      }, { rootMargin: "200px" });
+      observer.observe(host.current); return () => observer.disconnect();
+    }, []);
 
     useEffect(() => {
+      if (!visible || !isExpanded) return;
+      setPreview(null);
+      setLoading(false);
       if (fileType === 'other') return;
       if (fileType === 'image') {
         setPreview(url);
@@ -41,52 +46,78 @@ export const FileBlock = createReactBlockSpec(fileBlockSchema, {
       // PDF: render first page as image
       if (fileType === 'pdf') {
         let cancelled = false;
+        let loadingTask: import('pdfjs-dist').PDFDocumentLoadingTask | undefined;
+        let renderTask: import('pdfjs-dist').RenderTask | undefined;
+        const releasePdf = () => {
+          renderTask?.cancel();
+          renderTask = undefined;
+          const task = loadingTask;
+          loadingTask = undefined;
+          if (task) void task.destroy().catch(() => {});
+        };
         setLoading(true);
-        (async () => {
+        void runPreview(async () => {
           try {
-            const pdf = await pdfjsLib.getDocument({ url }).promise;
+            const [pdfjsLib, { default: pdfjsWorker }] = await Promise.all([
+              import('pdfjs-dist'),
+              import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+            ]);
+            if (cancelled) return;
+            pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
+            loadingTask = pdfjsLib.getDocument({ url });
+            const pdf = await loadingTask.promise;
             const page = await pdf.getPage(1);
+            if (cancelled) return;
             const viewport = page.getViewport({ scale: 1.5 });
             const canvas = document.createElement('canvas');
             canvas.width = viewport.width;
             canvas.height = viewport.height;
             const ctx = canvas.getContext('2d');
             if (!ctx) throw new Error('no canvas context');
-            await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+            renderTask = page.render({ canvas, canvasContext: ctx, viewport });
+            await renderTask.promise;
             if (!cancelled) setPreview(canvas.toDataURL());
           } catch { if (!cancelled) setPreview(null); }
-          finally { if (!cancelled) setLoading(false); }
-        })();
-        return () => { cancelled = true; };
+          finally { releasePdf(); if (!cancelled) setLoading(false); }
+        });
+        return () => { cancelled = true; releasePdf(); };
       }
       // Word docx: extract raw text via mammoth
       if (fileType === 'docx') {
         let cancelled = false;
+        const controller = new AbortController();
         setLoading(true);
-        (async () => {
+        void runPreview(async () => {
           try {
-            const response = await fetch(url);
+            const { default: mammoth } = await import("mammoth");
+            if (cancelled) return;
+            const response = await fetch(url, { signal: controller.signal });
+            if (!response.ok) throw new Error('无法读取附件');
+            if (Number(response.headers.get('content-length')) > 20 * 1024 * 1024) throw new Error('附件过大，请打开原文件');
             const arrayBuffer = await response.arrayBuffer();
             const result = await mammoth.extractRawText({ arrayBuffer });
-            if (!cancelled) setPreview(result.value);
+            if (!cancelled) setPreview(result.value.slice(0, 65536) + (result.value.length > 65536 ? '\n…请打开原文件查看全文。' : ''));
           } catch { if (!cancelled) setPreview(null); }
           finally { if (!cancelled) setLoading(false); }
-        })();
-        return () => { cancelled = true; };
+        });
+        return () => { cancelled = true; controller.abort(); };
       }
       // Text file: read full content
       let cancelled = false;
+      const controller = new AbortController();
       setLoading(true);
-      (async () => {
+      void runPreview(async () => {
         try {
-          const response = await fetch(url);
-          const content = await response.text();
+          if (cancelled) return;
+          const response = await fetch(url, { signal: controller.signal });
+          if (!response.ok) throw new Error('无法读取附件');
+          const content = await previewText(response);
           if (!cancelled) setPreview(content);
         } catch { if (!cancelled) setPreview(null); }
         finally { if (!cancelled) setLoading(false); }
-      })();
-      return () => { cancelled = true; };
-    }, [url, fileType]);
+      });
+      return () => { cancelled = true; controller.abort(); };
+    }, [url, fileType, visible, isExpanded]);
 
     const handleDbClick = async (e: React.MouseEvent) => {
       e.preventDefault(); e.stopPropagation();
@@ -103,7 +134,7 @@ export const FileBlock = createReactBlockSpec(fileBlockSchema, {
     };
 
     return (
-      <div className={"bn-file-block-content"} onDoubleClick={handleDbClick}
+      <div ref={host} className={"bn-file-block-content"} onDoubleClick={handleDbClick}
         style={{ display: "flex", flexDirection: "column", padding: "10px", margin: "5px 0",
           border: "1px solid #dee0e3", borderRadius: "8px", backgroundColor: "white",
           cursor: "pointer", userSelect: "none", transition: "all 0.2s", width: "100%",
@@ -150,7 +181,7 @@ export const FileBlock = createReactBlockSpec(fileBlockSchema, {
                 onClick={handleDbClick} title="双击打开原文件"
                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
             ) : (
-              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>无法预览</div>
+              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>{visible?"无法预览，可双击打开原文件":"进入可视区域后加载预览"}</div>
             )}
           </div>
         )}
@@ -163,7 +194,7 @@ export const FileBlock = createReactBlockSpec(fileBlockSchema, {
             ) : preview ? (
               <pre style={previewStyle}>{preview}</pre>
             ) : (
-              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>无法预览</div>
+              <div style={{ padding: "12px", fontSize: "12px", color: "#bbb" }}>{visible?"无法预览，可双击打开原文件":"进入可视区域后加载预览"}</div>
             )}
           </div>
         )}

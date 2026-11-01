@@ -16,21 +16,13 @@ export const calloutBlockSchema = {
     title: { default: "" },
   },
   content: "inline" as const,
-  toExternalHTML: (block: any) => {
-    const style = CALLOUT_STYLES[block.props.calloutType] || CALLOUT_STYLES.info;
-    const div = document.createElement("div");
-    div.style.borderLeft = `4px solid ${style.border}`;
-    div.style.background = style.bg;
-    div.style.padding = "10px 16px";
-    div.style.borderRadius = "6px";
-    div.style.margin = "10px 0";
-    div.innerHTML = `<strong>${style.icon} ${block.props.title || ''}</strong><br>...</div>`;
-    return { dom: div };
-  }
 };
 
 export const CalloutBlock = createReactBlockSpec(calloutBlockSchema, {
-  render: ({ block, editor }) => {
+  toExternalHTML: ({ block, contentRef }) => <aside>
+    <strong>{block.props.title || block.props.calloutType}</strong><div ref={contentRef} />
+  </aside>,
+  render: ({ block, editor, contentRef }) => {
     const style = CALLOUT_STYLES[block.props.calloutType] || CALLOUT_STYLES.info;
     const types = Object.keys(CALLOUT_STYLES);
 
@@ -43,28 +35,24 @@ export const CalloutBlock = createReactBlockSpec(calloutBlockSchema, {
         margin: "10px 0",
         color: style.color,
         position: "relative",
+        width: "100%", minWidth:0,
       }}>
         <div className="export-exclude no-print" style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px", fontSize: "13px", fontWeight: 600 }}>
           <span>{style.icon}</span>
-          {block.props.title ? (
-            <span>{block.props.title}</span>
-          ) : (
-            <span style={{ color: "#999", fontStyle: "italic" }}>（可选标题）</span>
-          )}
+          {editor.isEditable ? <input aria-label="提示框标题" placeholder="可选标题" value={block.props.title}
+            onChange={event => editor.updateBlock(block, { props: { title: event.target.value } })}
+            style={{ minWidth: 0, flex:1, width:"auto", border: 0, background: "transparent", color: "inherit" }} />
+            : <span>{block.props.title || block.props.calloutType}</span>}
           <select
+            aria-label="提示框类型" disabled={!editor.isEditable}
             value={block.props.calloutType}
             onChange={(e) => editor.updateBlock(block, { props: { ...block.props, calloutType: e.target.value } })}
             onClick={(e) => e.stopPropagation()}
-            style={{ marginLeft: "auto", fontSize: "11px", border: "1px solid #ddd", borderRadius: "4px", background: "white", padding: "2px 4px", cursor: "pointer", color: "#666" }}>
-            {types.map(t => <option key={t} value={t}>{CALLOUT_STYLES[t].icon} {t}</option>)}
+            style={{ marginLeft: "auto", flexShrink:0, minWidth:90, fontSize: "11px", border: "1px solid #ddd", borderRadius: "4px", background: "white", padding: "2px 4px", cursor: "pointer", color: "#666" }}>
+            {types.map(t => <option key={t} value={t}>{CALLOUT_STYLES[t].icon} {{info:"信息",warning:"警告",error:"错误",tip:"提示"}[t]}</option>)}
           </select>
         </div>
-        <div style={{ fontSize: "14px", lineHeight: 1.6 }} ref={(el) => {
-          if (el && !el.hasAttribute('data-callout-setup')) {
-            el.setAttribute('data-callout-setup', '1');
-            // The BlockNote editor handles inline content rendering
-          }
-        }} />
+        <div style={{ fontSize: "inherit", lineHeight: "inherit" }} ref={contentRef} />
       </div>
     );
   }

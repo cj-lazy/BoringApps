@@ -1,7 +1,44 @@
-# Tauri + React + Typescript
+# No.1 本地笔记 · 4.1.0
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+基于 Tauri、React 和 BlockNote 的本地技术笔记工具。支持 Markdown、公式、代码、流程图、图片与文件附件、双栏编辑，以及 Word/PDF 和笔记附件包导出。
 
-## Recommended IDE Setup
+## 使用与更新
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+可从仓库根目录获取 [Windows 便携版](../portable-note.exe)。源码构建的程序位于 `src-tauri/target/release/portable-note.exe`。
+
+笔记库位于程序旁边的 `data` 文件夹。更新时先退出旧程序，备份整个 `data`，再替换程序文件，并保留 `data` 的位置。直接运行构建目录中的程序会使用构建目录旁的笔记库。
+
+- 左侧选择笔记；双栏时 `Ctrl+点击` 在右栏打开。
+- 输入 `/` 插入内容，两栏使用相同的插入菜单。
+- `Ctrl+S` 保存两栏；切换、关闭、失焦时也会保存。
+- 编辑停止约 700 毫秒后写入恢复草稿。异常退出后重新启动可选择恢复；草稿恢复和正式保存是两个步骤。
+- 搜索、撤销、字数、大纲、源码和导出跟随当前活动栏。
+- 工具栏“更多”中提供源码切换、历史版本、草稿恢复、附件链接检查和附件包导出。
+- 设置中可调整正文宽度、字号、行距和背景。
+
+## 数据与便携
+
+- `.md`：笔记正文；`assets`：附件。
+- `.workspace.json`：收藏、标签页、滚动位置、布局和阅读设置。
+- `.drafts`：按编辑会话隔离的恢复草稿；未恢复的旧草稿不会被当前会话的保存清除。
+- `.backups`：正式保存前的历史版本；可在界面中对比并恢复。
+- `.history-renames.json`：笔记和文件夹改名后的历史路径关联。
+- `.trash`：回收站。
+
+附件路径以笔记库根目录为基准，显示时解析到当前机器。旧的 `data/assets` 绝对链接仍可兼容读取；通过“检查附件链接”预览缺失附件和迁移候选，再选择需要迁移的笔记。迁移会先备份，不会仅因打开笔记就改写原文。
+
+“导出笔记及附件包”生成 ZIP，将 Markdown 放在包的根目录，并带上所有引用的本地附件。完整解压后可在其他 Markdown 工具中打开。远程链接保持原样，附件包不下载远程资源。
+
+外部程序同时修改文件时，程序取消覆盖，并提供磁盘版本与当前内容的对比，可采用磁盘版本或将当前内容另存为副本。
+
+## 开发与验证
+
+```powershell
+npm ci
+npm run tauri dev
+npm test
+npx tsc --noEmit
+npm run tauri build -- --no-bundle
+```
+
+Rust 检查、真实 Markdown 样本验证和隔离桌面验收步骤见 `tests/README.md`。详细改动与验证记录见 `OPTIMIZATION-NOTES.md`。

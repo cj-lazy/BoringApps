@@ -1,30 +1,45 @@
 import { useState, useRef, useEffect } from "react";
 import { defaultProps } from "@blocknote/core";
 import { createReactBlockSpec } from "@blocknote/react";
-import katex from "katex";
+import { blockOwnText } from "../utils/blockText";
+import MathPreview from "../components/MathPreview";
+import { decodeMath } from "../utils/mathSyntax";
 
 export const latexBlockSchema = {
     type: "latex" as const,
     propSchema: { ...defaultProps, text: { default: "" } },
     content: "none" as const,
-    toExternalHTML: (block: any) => {
-        const div = document.createElement("p");
-        div.innerText = `$$\n${block.props.text}\n$$`;
-        div.style.fontFamily = "Consolas, monospace";
-        return { dom: div };
-    }
 };
 
 export const LatexBlock = createReactBlockSpec(latexBlockSchema, {
+    toExternalHTML: ({ block }) => <pre>{"$$\n" + blockOwnText(block) + "\n$$"}</pre>,
     render: ({ block, editor }) => {
-      const divRef = useRef<HTMLDivElement>(null);
       const [isEditing, setIsEditing] = useState(false);
-      const [inputValue, setInputValue] = useState(() => { try { return decodeURIComponent(block.props.text); } catch { return block.props.text; } });
+      const [inputValue, setInputValue] = useState(() => decodeMath(block.props.text));
       const textAreaRef = useRef<HTMLTextAreaElement>(null);
-      useEffect(() => { try { const decoded = decodeURIComponent(block.props.text); if (decoded !== inputValue) setInputValue(decoded); } catch { if (block.props.text !== inputValue) setInputValue(block.props.text); } }, [block.props.text]);
+      const cancelled = useRef(false);
+      useEffect(() => { setInputValue(decodeMath(block.props.text)); }, [block.props.text]);
       useEffect(() => { if (isEditing && textAreaRef.current) textAreaRef.current.focus(); }, [isEditing]);
-      useEffect(() => { if (!isEditing && divRef.current) { if (!inputValue) { divRef.current.innerText = "点击输入 LaTeX 公式..."; divRef.current.style.color = "#ccc"; } else { try { katex.render(inputValue, divRef.current, { throwOnError: false, displayMode: true, output: "html" }); divRef.current.style.color = "inherit"; } catch (e) { divRef.current.innerText = "⚠️ 公式错误"; } } } }, [inputValue, isEditing]);
-      const handleSave = () => { editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(inputValue) } }); setIsEditing(false); };
-      return ( <div style={{ padding: "10px", margin: "5px 0", userSelect: "none" }}> {isEditing ? ( <div className="export-exclude no-print" style={{ display: "flex", flexDirection: "column", gap: "5px" }}> <textarea ref={textAreaRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === "Escape") { setIsEditing(false); setInputValue(block.props.text); } }} onBlur={handleSave} placeholder="输入 LaTeX 公式..." style={{ width: "100%", minHeight: "80px", padding: "10px", fontFamily: "Consolas, Monaco, monospace", fontSize: "14px", borderRadius: "6px", border: "2px solid #1890ff", outline: "none", resize: "vertical", backgroundColor: "#f9f9f9" }} /> <div style={{fontSize: "12px", color: "#888"}}>按 Enter 保存</div> </div> ) : ( <div ref={divRef} onClick={() => setIsEditing(true)} style={{ minHeight: "40px", cursor: "pointer", padding: "10px", borderRadius: "6px", textAlign: "center" }} onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(0,0,0,0.03)"} onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"} title="点击编辑公式" /> )} </div> );
+      const handleSave = () => {
+        if (!cancelled.current && inputValue !== decodeMath(block.props.text)) editor.updateBlock(block, { props: { ...block.props, text: encodeURIComponent(inputValue) } });
+        setIsEditing(false);
+      };
+      return <div contentEditable={false} style={{ padding: 10, margin: "5px 0" }}>
+        {isEditing ? <div className="export-exclude no-print">
+          <textarea ref={textAreaRef} aria-label="编辑独立公式" value={inputValue} onChange={event => setInputValue(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.blur(); }
+              if (event.key === "Escape") { event.preventDefault(); cancelled.current = true; setInputValue(decodeMath(block.props.text)); event.currentTarget.blur(); }
+            }} onBlur={handleSave} placeholder="输入 LaTeX 公式..."
+            style={{ width: "100%", minHeight: 80, padding: 10, fontFamily: "Consolas, monospace", fontSize: 14, borderRadius: 6, border: "2px solid #1890ff", boxSizing: "border-box" }} />
+          <small>Enter 保存 · Shift+Enter 换行 · Esc 取消</small>
+        </div> : <div title="点击编辑公式" role="button" tabIndex={0}
+          onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }}
+          onKeyDown={event => { if (event.key === "Enter" && editor.isEditable) { event.preventDefault(); cancelled.current = false; setIsEditing(true); } }}
+          onClick={() => { if (editor.isEditable) { cancelled.current = false; setIsEditing(true); } }}
+          style={{ minHeight: 40, cursor: editor.isEditable ? "pointer" : "text", textAlign: "center" }}>
+          {inputValue ? <MathPreview text={inputValue} display /> : "点击输入 LaTeX 公式…"}
+        </div>}
+      </div>;
     },
 });

@@ -13,18 +13,10 @@ export const imageBlockSchema = {
         showPreview: { default: true }
     },
     content: "none" as const,
-    toExternalHTML: (block: any) => {
-        const div = document.createElement("div");
-        const img = document.createElement("img");
-        img.src = block.props.url;
-        img.alt = block.props.name;
-        img.setAttribute("width", block.props.width.toString());
-        div.appendChild(img);
-        return { dom: div };
-    }
 };
 
 export const ImageBlock = createReactBlockSpec(imageBlockSchema, {
+    toExternalHTML: ({ block }) => <img src={block.props.url} alt={block.props.name} width={block.props.width} />,
     render: ({ block, editor }) => {
         const [size, setSize] = useState({ width: block.props.width });
         const imgRef = useRef<HTMLImageElement>(null);
@@ -65,13 +57,14 @@ export const ImageBlock = createReactBlockSpec(imageBlockSchema, {
                     draggable={false}
                     style={{
                         width: `${size.width}px`,
+                        maxWidth: "100%",
                         height: "auto",
                         borderRadius: "4px",
                         boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
                         display: "block"
                     }}
                 />
-                <ResizeHandle onResizeStart={handleResizeStart} />
+                {editor.isEditable && <ResizeHandle onResizeStart={handleResizeStart} />}
             </div>
         );
     }

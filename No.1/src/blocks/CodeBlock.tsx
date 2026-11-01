@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { defaultProps } from "@blocknote/core";
 import { createReactBlockSpec } from "@blocknote/react";
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vs } from 'react-syntax-highlighter/dist/esm/styles/prism';
+const SyntaxHighlighter = lazy(() => import("../components/CodeHighlight"));
 import ResizeHandle from "../components/ResizeHandle";
+import { blockOwnText } from "../utils/blockText";
 
 export const codeBlockSchema = {
   type: "codeBlock" as const,
@@ -15,17 +15,10 @@ export const codeBlockSchema = {
     height: { default: 300 },
   },
   content: "none" as const,
-  toExternalHTML: (block: any) => {
-    const pre = document.createElement("pre");
-    pre.style.backgroundColor = "#f0f0f0";
-    const codeContent = block.props.text || "";
-    const lang = block.props.language || "text";
-    pre.innerText = `\`\`\`${lang}\n${codeContent}\n\`\`\``;
-    return { dom: pre };
-  }
 };
 
 export const CodeBlock = createReactBlockSpec(codeBlockSchema, {
+  toExternalHTML: ({ block }) => <pre><code className={`language-${block.props.language}`}>{blockOwnText(block)}</code></pre>,
   render: ({ block, editor }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [code, setCode] = useState(() => { try { return decodeURIComponent(block.props.text); } catch { return block.props.text; } });
@@ -90,7 +83,7 @@ export const CodeBlock = createReactBlockSpec(codeBlockSchema, {
              <span style={{ fontWeight: 600, color: "#333", fontFamily: "sans-serif" }}>代码块</span>
           </div>
           <div style={{ display: "flex", alignItems: "center" }}>
-             <select value={lang} onChange={(e) => { const newLang = e.target.value; setLang(newLang); editor.updateBlock(block, { props: { ...block.props, language: newLang } }); }} onClick={(e) => e.stopPropagation()} style={{ background: "transparent", border: "none", outline: "none", color: "#646a73", cursor: "pointer", fontWeight: 500, fontSize: "12px", fontFamily: "sans-serif", textAlign: "left" }}>
+             <select disabled={!editor.isEditable} aria-label="代码语言" value={lang} onChange={(e) => { const newLang = e.target.value; setLang(newLang); editor.updateBlock(block, { props: { ...block.props, language: newLang } }); }} onClick={(e) => e.stopPropagation()} style={{ background: "transparent", border: "none", outline: "none", color: "#646a73", cursor: "pointer", fontWeight: 500, fontSize: "12px", fontFamily: "sans-serif", textAlign: "left" }}>
               {languages.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
             </select>
             <span style={{ color: "#dee0e3", margin: "0 6px" }}>|</span>
@@ -101,15 +94,15 @@ export const CodeBlock = createReactBlockSpec(codeBlockSchema, {
           {isEditing ? (
             <textarea ref={textareaRef} value={code} onChange={(e) => setCode(e.target.value)} onBlur={handleSave} onKeyDown={(e) => { if (e.key === 'Tab') { e.preventDefault(); const start = e.currentTarget.selectionStart; const end = e.currentTarget.selectionEnd; const val = e.currentTarget.value; e.currentTarget.value = val.substring(0, start) + "  " + val.substring(end); e.currentTarget.selectionStart = e.currentTarget.selectionEnd = start + 2; setCode(e.currentTarget.value); } if (e.key === 'Escape') handleSave(); }} spellCheck={false} style={{ flex: 1, height: "100%", width: "100%", padding: "12px", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", border: "none", outline: "none", backgroundColor: "#ffffff", color: "#333", resize: "none", whiteSpace: "pre", display: "block", overflow: "auto" }} />
           ) : (
-            <div onClick={() => setIsEditing(true)} style={{ flex: 1, height: "100%", width: "100%", backgroundColor: "#ffffff", cursor: "text", overflow: "auto" }}>
-              <SyntaxHighlighter language={block.props.language} style={vs} PreTag="div" customStyle={{ margin: 0, padding: "12px", backgroundColor: "transparent", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} codeTagProps={{ style: { fontFamily: 'Menlo, Monaco, "Courier New", monospace', backgroundColor: "transparent" } }} showLineNumbers={true} lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}>
+            <div onClick={() => {if(editor.isEditable)setIsEditing(true);}} style={{ flex: 1, height: "100%", width: "100%", backgroundColor: "#ffffff", cursor: "text", overflow: "auto" }}>
+              <Suspense fallback={<pre style={{ padding: 12, whiteSpace: "pre-wrap" }}>{code}</pre>}><SyntaxHighlighter language={block.props.language} PreTag="div" customStyle={{ margin: 0, padding: "12px", backgroundColor: "transparent", fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: "13px", lineHeight: "1.5", overflow: "visible", height: "100%", boxSizing: "border-box" }} codeTagProps={{ style: { fontFamily: 'Menlo, Monaco, "Courier New", monospace', backgroundColor: "transparent" } }} showLineNumbers={true} lineNumberStyle={{ minWidth: "2.5em", paddingRight: "1em", color: "#ccc", textAlign: "right", borderRight: `1px solid #eee`, marginRight: "1em", fontFamily: "Consolas, monospace", fontSize: "12px", lineHeight: "1.5" }}>
                 {code || " "}
-              </SyntaxHighlighter>
+              </SyntaxHighlighter></Suspense>
               {!code && <div className="export-exclude no-print" style={{position:"absolute", top: 12, left: 60, color: "#ccc", pointerEvents:"none", fontFamily:"sans-serif", fontSize:"13px"}}>点击输入代码...</div>}
             </div>
           )}
         </div>
-        {!isEditing && <ResizeHandle onResizeStart={handleResizeStart} />}
+        {!isEditing && editor.isEditable && <ResizeHandle onResizeStart={handleResizeStart} />}
       </div>
     );
   }
