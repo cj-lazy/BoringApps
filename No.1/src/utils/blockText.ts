@@ -7,6 +7,7 @@ const contentToPlainText = (content: unknown): string => {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map(contentToPlainText).join("");
   if (!isRecord(content)) return "";
+  if (content.type === "noteLink" && isRecord(content.props)) return String(content.props.label || content.props.target || "");
 
   if (content.type === "inlineMath" && isRecord(content.props) && typeof content.props.text === "string") {
     try { return decodeURIComponent(content.props.text); } catch { return content.props.text; }

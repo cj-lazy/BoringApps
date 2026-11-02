@@ -6,9 +6,17 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
+mod attachments;
+mod batch_notes;
+mod capture;
+mod catalog;
+mod jobs;
 mod library;
+mod library_manager;
 mod maintenance;
+mod rename_links;
 mod search;
 mod storage;
 
@@ -23,13 +31,7 @@ struct FileNode {
 // === 📂 路径辅助函数 ===
 
 fn get_data_dir() -> PathBuf {
-    let exe_path = std::env::current_exe().expect("无法获取程序路径");
-    let exe_dir = exe_path.parent().expect("无法获取程序目录");
-    let data_dir = exe_dir.join("data");
-    if !data_dir.exists() {
-        let _ = fs::create_dir_all(&data_dir);
-    }
-    data_dir
+    library_manager::root()
 }
 
 fn get_assets_root() -> PathBuf {
@@ -428,33 +430,22 @@ fn delete_item(path: String, is_dir: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn rename_item(old_path: String, new_path: String, is_dir: bool) -> Result<(), String> {
+fn rename_item(
+    old_path: String,
+    new_path: String,
+    is_dir: bool,
+    changes: Option<Vec<rename_links::TextChange>>,
+) -> Result<(), String> {
     let _storage_guard = maintenance::STORAGE_MUTATION
         .lock()
         .map_err(|_| "存储锁不可用")?;
-    let old_full = data_item_path(&old_path, is_dir)?;
-    let new_full = data_item_path(&new_path, is_dir)?;
-    if old_full == new_full {
-        return Ok(());
-    }
-    if new_full.exists() {
-        return Err("目标位置已有同名文件，已取消覆盖".into());
-    }
-    if is_dir && new_full.starts_with(&old_full) {
-        return Err("不能把文件夹移动到自身内部".into());
-    }
-    if let Some(parent) = new_full.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    // Markdown contains asset URLs; moving the asset directory breaks those links.
-    fs::rename(&old_full, &new_full).map_err(|e| e.to_string())?;
-    if let Err(error) =
-        library::record_history_rename(&get_data_dir(), &old_path, &new_path, is_dir)
-    {
-        fs::rename(&new_full,&old_full).map_err(|rollback|format!("笔记已移动，但历史路径保存失败（{error}），回退失败（{rollback}）。请重新载入目录。"))?;
-        return Err(format!("历史路径保存失败，移动已回退: {error}"));
-    }
-    Ok(())
+    rename_links::rename(
+        &get_data_dir(),
+        old_path,
+        new_path,
+        is_dir,
+        changes.unwrap_or_default(),
+    )
 }
 
 #[tauri::command]
@@ -758,13 +749,22 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Err(error) = library_manager::initialize() {
+                app.dialog()
+                    .message(&error)
+                    .title("无法打开笔记库")
+                    .blocking_show();
+                return Err(std::io::Error::other(error).into());
+            }
             let assets = get_assets_root();
             ensure_path_within(&get_data_dir(), &assets).map_err(std::io::Error::other)?;
             app.asset_protocol_scope().allow_directory(assets, true)?;
+            capture::register_hotkey(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             library::get_library_root,
+            library::note_disk_state,
             library::load_workspace,
             library::save_workspace,
             library::save_draft,
@@ -773,7 +773,29 @@ pub fn run() {
             library::list_note_versions,
             library::read_note_version,
             library::asset_exists,
+            library::load_templates,
+            library::save_templates,
             search::search_notes_page,
+            catalog::catalog_delta,
+            batch_notes::apply_note_changes,
+            jobs::cancel_job,
+            attachments::begin_asset_upload,
+            attachments::append_asset_upload,
+            attachments::finish_asset_upload,
+            attachments::cancel_asset_upload,
+            attachments::inspect_attachments,
+            attachments::import_asset_file,
+            attachments::export_note_package,
+            capture::show_capture_window,
+            capture::save_capture,
+            capture::open_captured_note,
+            capture::capture_hotkey_status,
+            capture::ensure_daily_note,
+            library_manager::library_status,
+            library_manager::switch_library,
+            library_manager::backup_library,
+            library_manager::inspect_library_backup,
+            library_manager::restore_library_backup,
             inspect_storage,
             cleanup_storage,
             get_file_tree,

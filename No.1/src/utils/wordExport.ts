@@ -2,23 +2,22 @@ import {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun,
   ExternalHyperlink, ImportedXmlComponent, HeadingLevel, AlignmentType,
   WidthType, TableLayoutType, LevelFormat, BorderStyle, FootnoteReferenceRun,
-  VerticalAlign,
+  VerticalAlign, Header, Footer, SimpleField, PageNumber,
 } from "docx";
 import { latexToOfficeMath } from "./wordMath.ts";
 import { decodeMarkdownEntities, decodeMath, excludedInlineMathRanges, mathSpans, protectInlineMath } from "./mathSyntax.ts";
 import type { MathSpan } from "./mathSyntax.ts";
 import { legacyMathParts } from "./legacyMath.ts";
 
+import {parseWordLayout,type WordLayout} from "./wordLayout.ts";
 export interface WordImage { data: Uint8Array; type: "png" | "jpg" | "gif" | "bmp"; width: number; height: number; }
 export interface WordExportOptions {
   title: string;
+  layout?: WordLayout;
   image: (url: string) => Promise<WordImage>;
   diagram: (code: string) => Promise<WordImage>;
 }
 
-const WIDTH = 9360;
-const font = { ascii: "Calibri", hAnsi: "Calibri", eastAsia: "宋体", cs: "Calibri" };
-const spacing = { before: 0, after: 120, line: 300 };
 const headingLevels = [HeadingLevel.HEADING_1, HeadingLevel.HEADING_2, HeadingLevel.HEADING_3, HeadingLevel.HEADING_4, HeadingLevel.HEADING_5, HeadingLevel.HEADING_6];
 const border = { style: BorderStyle.SINGLE, size: 4, color: "D9D9D9" };
 const sourceOf = (block: any) => decodeMath(block.props?.source || "");
@@ -29,11 +28,20 @@ const safeLink = (url: string) => {
 };
 
 export async function exportWord(blocks: any[], options: WordExportOptions): Promise<Uint8Array> {
+  const layout=parseWordLayout(options.layout), margin=Math.round(layout.margin*1440/25.4);
+  const page=layout.paper==="A4"?{width:11906,height:16838}:{width:12240,height:15840};
+  const WIDTH=page.width-margin*2;
+  const font={ascii:layout.westernFont,hAnsi:layout.westernFont,eastAsia:layout.font,cs:layout.westernFont};
+  const spacing={before:0,after:120,line:Math.round(layout.lineHeight*240)};
+  let figure=0,equations=0;
   const numbering: any[] = [];
+  if(layout.headingNumbers)numbering.push({reference:"headings",levels:headingLevels.map((_,level)=>({level,format:LevelFormat.DECIMAL,text:Array.from({length:level+1},(_,i)=>`%${i+1}`).join(".")+".",alignment:AlignmentType.LEFT,style:{paragraph:{indent:{left:0,hanging:0}}}}))});
+  const heading=(level:number)=>({heading:headingLevels[level],...(layout.headingNumbers?{numbering:{reference:"headings",level}}:{})});
   const footnotes: Record<string, { children: Paragraph[] }> = {};
   const footnoteIds = new Map<string, number>();
   const definitions = new Map<string, any>();
   const footnoteDefinitions = new Map<string, any>();
+  const visualFootnotes=new Map<string,any>();
   const mathTokens = new Map<string, MathSpan>();
   const rawTrees = new Map<string, any>();
   const [{ unified }, parse, gfm, frontmatter] = await Promise.all([import("unified"), import("remark-parse"), import("remark-gfm"), import("remark-frontmatter")]);
@@ -51,6 +59,7 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
   }
   const collectSources = (items: any[]) => items.forEach(block => {
     if (block.type === "rawMarkdown") parseRaw(sourceOf(block));
+    if(block.type==="footnote"){if(visualFootnotes.has(block.props.identifier))throw new Error("脚注标识重复："+block.props.identifier);visualFootnotes.set(block.props.identifier,block);}
     collectSources(block.children || []);
   });
   collectSources(blocks);
@@ -63,7 +72,8 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
     } catch (error) { throw new Error(`公式“${tex.slice(0, 60)}”无法导出为 Word 原生公式：${String(error)}`); }
   }
   const para = (children: any[], extra: any = {}) => new Paragraph({ children, spacing, ...extra });
-  const equation = (tex: string) => para([math(tex, true)], { alignment: AlignmentType.CENTER, spacing: { before: 120, after: 160 } });
+  const equation = (tex: string) => para([math(tex, true),...(layout.equationNumbers?[new TextRun("  ("),new SimpleField("SEQ Equation \\* ARABIC",String(++equations)),new TextRun(")")]:[])], { alignment: AlignmentType.CENTER, spacing: { before: 120, after: 160 } });
+  const caption=(label:string)=>para([text("图 "),new SimpleField("SEQ Figure \\* ARABIC",String(++figure)),text(label?"  "+label:"")],{alignment:AlignmentType.CENTER,keepNext:false});
   function text(value: string, styles: any = {}): TextRun {
     return new TextRun({ text: value, font: styles.code ? "Consolas" : font,
       bold: !!styles.bold, italics: !!styles.italic, strike: !!styles.strike,
@@ -76,7 +86,7 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
       format: bullet ? LevelFormat.BULLET : LevelFormat.DECIMAL,
       text: bullet ? ["•", "◦", "▪"][level % 3] : `%${level + 1}.`,
       alignment: AlignmentType.LEFT,
-      style: { paragraph: { indent: { left: 540 + level * 360, hanging: 270 }, spacing: { before: 0, after: 80, line: 300 } }, run: { font, size: 22 } },
+      style: { paragraph: { indent: { left: 540 + level * 360, hanging: 270 }, spacing: { before: 0, after: 80, line: 300 } }, run: { font, size: layout.fontSize*2 } },
     })) });
     return { reference, level: Math.min(8, depth) };
   };
@@ -92,7 +102,7 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
   }
   async function image(url: string, width?: number): Promise<ImageRun> {
     const item = await options.image(url);
-    const w = Math.max(1, Math.min(624, width || item.width));
+    const w = Math.max(1, Math.min(WIDTH/15, width || item.width));
     return new ImageRun({ type: item.type, data: item.data, transformation: { width: w, height: Math.max(1, w * item.height / item.width) } });
   }
   async function inline(items: any): Promise<any[]> {
@@ -100,6 +110,11 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
     const result: any[] = [];
     for (const item of items || []) {
       if (item.type === "inlineMath") result.push(math(decodeMath(item.props.text), item.props.display));
+      else if(item.type==="footnoteRef"){
+        const id=item.props.identifier;if(!visualFootnotes.has(id)&&!footnoteDefinitions.has(id))throw new Error("找不到脚注："+id);
+        if(!footnoteIds.has(id))footnoteIds.set(id,footnoteIds.size+1);result.push(new FootnoteReferenceRun(footnoteIds.get(id)!));
+      }
+      else if (item.type === "noteLink") result.push(text(item.props.label || item.props.target));
       else if (item.type === "link") result.push(new ExternalHyperlink({ link: safeLink(item.href), children: await inline(item.content) }));
       else if (typeof item.text === "string") result.push(...item.text.split("\n").flatMap((line: string, index: number) => [ ...(index ? [new TextRun({ break: 1 })] : []), text(line, item.styles) ]));
       else throw new Error(`尚不能导出此行内模块：${item.type}`);
@@ -127,7 +142,7 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
         if (!ref) throw new Error(`找不到链接引用：${node.identifier}`);
         result.push(new ExternalHyperlink({ link: safeLink(ref.url), children: await astInline(node.children, styles) }));
       } else if (node.type === "footnoteReference") {
-        if (!footnoteDefinitions.has(node.identifier)) throw new Error(`找不到脚注：${node.identifier}`);
+        if (!footnoteDefinitions.has(node.identifier)&&!visualFootnotes.has(node.identifier)) throw new Error(`找不到脚注：${node.identifier}`);
         if (!footnoteIds.has(node.identifier)) footnoteIds.set(node.identifier, footnoteIds.size + 1);
         result.push(new FootnoteReferenceRun(footnoteIds.get(node.identifier)!));
       } else if (node.type === "html") result.push(text(node.value));
@@ -163,7 +178,7 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
       if (["definition", "footnoteDefinition"].includes(node.type)) continue;
       if (node.type === "paragraph" || node.type === "heading") {
         const lone = node.children.length === 1 && node.children[0].type === "text" ? mathTokens.get(node.children[0].value) : null;
-        out.push(lone?.display ? equation(lone.tex) : para(await astInline(node.children), node.type === "heading" ? { heading: headingLevels[Math.min(node.depth, 6) - 1] } : {}));
+        out.push(lone?.display ? equation(lone.tex) : para(await astInline(node.children), node.type === "heading" ? heading(Math.min(node.depth, 6) - 1) : {}));
       } else if (node.type === "list") {
         const list = numbered(Math.min(depth, 8), node.start ?? 1, !node.ordered);
         for (const item of node.children) {
@@ -190,7 +205,7 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
   }
   async function diagram(value: string): Promise<Paragraph> {
     const item = await options.diagram(value);
-    const width = Math.min(item.width, 624);
+    const width = Math.min(item.width, WIDTH/15);
     return para([new ImageRun({ type: item.type, data: item.data, transformation: { width, height: width * item.height / item.width } })]);
   }
   async function convert(items: any[], depth = 0): Promise<any[]> {
@@ -210,19 +225,20 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
         const children = await inline(block.content);
         if (block.type === "callout" && props.title) children.unshift(text(props.title + " — ", { bold: true }));
         out.push(para(children, {
-          ...(block.type === "heading" ? { heading: headingLevels[Math.max(0, Math.min(5, (props.level || 1) - 1))] } : {}),
+          ...(block.type === "heading" ? heading(Math.max(0, Math.min(5, (props.level || 1) - 1))) : {}),
           ...(block.type === "callout" || block.type === "quote" ? { indent: { left: 240 } } : {}),
           alignment: props.textAlignment || AlignmentType.LEFT,
         }));
       } else if (block.type === "codeBlock") out.push(...code(decodeMath(props.text)));
-      else if (block.type === "mermaid") out.push(await diagram(props.code || ""));
-      else if (block.type === "image") out.push(para([await image(props.url, Number(props.width) || undefined)]));
+      else if (block.type === "mermaid") {out.push(await diagram(props.code || ""));if(layout.captions)out.push(caption("流程图"));}
+      else if (block.type === "image") {out.push(para([await image(props.url, Number(props.width) || undefined)],{keepNext:layout.captions}));if(layout.captions)out.push(caption(props.name||""));}
       else if (block.type === "file" || block.type === "audio" || block.type === "video") out.push(para([new ExternalHyperlink({ link: safeLink(props.url || ""), children: [text(props.name || "附件")] })]));
       else if (block.type === "table") {
         const rows = await Promise.all(block.content.rows.map((row: any) => Promise.all(row.cells.map(async (cell: any) =>
           [para(await inline(Array.isArray(cell) ? cell : cell.content), { alignment: cell.props?.textAlignment || AlignmentType.LEFT })]))));
         out.push(table(rows, block.content.columnWidths));
-      } else if (block.type === "rawMarkdown") out.push(...await astBlocks(parseRaw(sourceOf(block)).children, depth));
+      } else if (["noteProperties","footnote","noteAnchor"].includes(block.type)) { /* Properties are library metadata; export the document body. */ }
+      else if (block.type === "rawMarkdown") out.push(...await astBlocks(parseRaw(sourceOf(block)).children, depth));
       else if (block.type === "legacyMath") {
         const parts = legacyMathParts(sourceOf(block));
         if (!parts) throw new Error("旧版公式的结构已改变，请检查原文后再导出");
@@ -230,25 +246,29 @@ export async function exportWord(blocks: any[], options: WordExportOptions): Pro
         parts.forEach(part => out.push(part.kind === "math" ? equation(part.text) : para(plainWithMath(part.text))));
       } else if (block.type === "divider") out.push(para([], { border: { bottom: border } }));
       else throw new Error(`尚不能导出此模块：${block.type}。已取消导出，避免遗漏内容。`);
-      if (block.children?.length) out.push(...await convert(block.children, depth + 1));
+      if (block.children?.length&&block.type!=="footnote") out.push(...await convert(block.children, depth + 1));
     }
     return out;
   }
   const children = await convert(blocks);
   for (const [identifier, id] of footnoteIds) {
-    footnotes[id] = { children: await astBlocks(footnoteDefinitions.get(identifier).children) };
+    const block=visualFootnotes.get(identifier);
+    footnotes[id] = { children: block?await convert([{...block,type:"paragraph",children:[]},...(block.children||[])]):await astBlocks(footnoteDefinitions.get(identifier).children) };
   }
   const document = new Document({ title: options.title, creator: "No.1", description: "Markdown 笔记导出", numbering: { config: numbering }, footnotes,
     styles: {
-      default: { document: { run: { font, size: 22, color: "202124" }, paragraph: { spacing } } },
+      default: { document: { run: { font, size: layout.fontSize*2, color: "202124" }, paragraph: { spacing } } },
       paragraphStyles: [
         ...headingLevels.map((_, index) => ({ id: `Heading${index + 1}`, name: `Heading ${index + 1}`, basedOn: "Normal", next: "Normal", quickFormat: true,
-          run: { font, size: [32, 26, 24, 23, 22, 22][index], color: "000000", bold: true },
+          run: { font, size: Math.max(layout.fontSize*2,[32, 26, 24, 23, 22, 22][index]), color: "000000", bold: true },
           paragraph: { spacing: { before: [360, 280, 200, 160, 120, 120][index], after: [200, 140, 100, 100, 80, 80][index] }, keepNext: true, outlineLevel: index } })),
         { id: "CodeBlock", name: "Code Block", basedOn: "Normal", run: { font: "Consolas", size: 19 }, paragraph: { spacing: { before: 0, after: 0, line: 260 } } },
       ],
     },
-    sections: [{ properties: { page: { size: { width: 12240, height: 15840 }, margin: { top: 1440, right: 1440, bottom: 1440, left: 1440, header: 708, footer: 708 } } }, children: children.length ? children : [para([])] }],
+    sections: [{ properties: { page: { size: page, margin: { top: margin, right: margin, bottom: margin, left: margin, header: 708, footer: 708 } } },
+      headers:layout.header?{default:new Header({children:[para([text(layout.header.split("{{title}}").join(options.title).split("{{date}}").join(new Date().toLocaleDateString("zh-CN")))],{alignment:AlignmentType.CENTER})]})}:undefined,
+      footers:layout.pageNumbers?{default:new Footer({children:[para([new TextRun({children:[PageNumber.CURRENT]})],{alignment:AlignmentType.CENTER})]})}:undefined,
+      children: children.length ? children : [para([])] }],
   });
   return new Uint8Array(await (await Packer.toBlob(document)).arrayBuffer());
 }

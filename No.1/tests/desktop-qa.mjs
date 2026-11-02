@@ -7,6 +7,9 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import JSZip from "jszip";
+import {productivityChecks,librarySwitchingChecks} from "./productivity-checks.mjs";
+import {comfortChecks} from "./comfort-checks.mjs";
+import {workflowChecks} from "./workflow-checks.mjs";
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 await mkdir(path.join(project, "artifacts"), { recursive: true });
@@ -52,6 +55,14 @@ const originalA = "# 验收笔记A\n\n初始内容。\n\n| 项目 | 结果 |\n|-
   + ["preview.pdf", "preview.docx", "text.txt"].map(name => "[FILE:" + name + "](" + assetUrl(name) + ")").join("\n\n") + "\n";
 await writeFile(path.join(data, "验收笔记A.md"), originalA);
 await writeFile(path.join(data, "验收笔记B.md"), "# 验收笔记B\n\n右侧初始内容。\n");
+await writeFile(path.join(data,".workspace.json"),JSON.stringify({autosaveSeconds:0}));
+await writeFile(path.join(data,"功能主笔记.md"),"---\ncustom: 保留字段\n---\n\n# 功能主笔记\n\n原始正文\n");
+await writeFile(path.join(data,"关联目标.md"),"# 关联目标\n\n## 具体方法\n\n方法正文\n");
+await writeFile(path.join(data,"关联来源.md"),"# 关联来源\n\n参考 [[功能主笔记]]。\n\n`[[关联目标]]`\n");
+await writeFile(path.join(data,"折叠粘贴样本.md"),"# 折叠粘贴样本\n\n## 第一节\n\n第一节正文\n\n## 第二节\n\n第二节正文\n");
+for(const name of ["批量样本甲","批量样本乙"])await writeFile(path.join(data,name+".md"),"---\ncustom: 保留\ntags: [旧标签]\n---\n\n# "+name+"\n\n$$a_b$$\n");
+await writeFile(path.join(data,"附件修复样本.md"),"# 附件修复样本\n\n[FILE:缺失](assets/missing-comfort.txt)\n\n`[FILE:示例](assets/missing-comfort.txt)`\n");
+await writeFile(path.join(assets,"旧重复一.txt"),"legacy duplicate");await writeFile(path.join(assets,"旧重复二.txt"),"legacy duplicate");
 const formulaSource = String.raw`# 公式兼容
 
 时刻 \(t\) 的无人机系统表示为：
@@ -135,7 +146,14 @@ const clickElement=async id=>{
   return call("POST","/element/"+id+"/click",{});
 };
 const click = async selector => clickElement(await find(selector));
-const clickText = async (text, tag = "*") => clickElement(await find("//" + tag + "[normalize-space(text())=" + JSON.stringify(text) + "]", "xpath"));
+const clickText = async (text, tag = "*") => {
+  let filtered=false;
+  if(tag==="span"&&!await execute("return [...document.querySelectorAll('.file-tree-name')].some(el=>el.textContent.trim()===arguments[0]&&el.getClientRects().length)",text)){
+    filtered=await execute("const input=document.querySelector('input[placeholder*=\"Ctrl+K\"]');if(!input)return false;Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,arguments[0]);input.dispatchEvent(new Event('input',{bubbles:true}));return true;",text);
+  }
+  await clickElement(await find("//" + tag + "[normalize-space(.)=" + JSON.stringify(text) + "]", "xpath"));
+  if(filtered)await execute("const input=document.querySelector('input[placeholder*=\"Ctrl+K\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));");
+};
 const type = async (selector, text) => call("POST", "/element/" + await find(selector) + "/value", { text, value: [...text] });
 const bodyText = () => execute("return document.body.innerText");
 const idle = () => wait(() => execute("return !document.querySelector('[data-editor-pane][inert]')"), "editor stayed busy");
@@ -157,12 +175,13 @@ try {
   session = created.sessionId;
   await call("POST", "/window/rect", { width: 1280, height: 960, x: 20, y: 20 });
   await check("Native startup and CSP enabled", async () => {
-    await wait(async () => (await bodyText()).includes("验收笔记A"), "file tree missing");
+    await wait(() => execute("return !!document.querySelector('.file-tree-name')"), "file tree missing");
     await execute("window.__qaLogs=[];const originalConsoleError=console.error.bind(console);console.error=(...values)=>{window.__qaLogs.push(values.map(v=>String(v)).join(' '));originalConsoleError(...values);};window.__qaErrors=[];window.__qaCsp=[];window.addEventListener('error',e=>window.__qaErrors.push(e.message));window.addEventListener('unhandledrejection',e=>window.__qaErrors.push(String(e.reason)));document.addEventListener('securitypolicyviolation',e=>window.__qaCsp.push({directive:e.effectiveDirective,uri:e.blockedURI}));");
     await execute("const script=document.createElement('script');script.textContent='window.__qaInjectedScriptRan=true';document.body.appendChild(script);");
     await wait(() => execute("return window.__qaCsp.some(event=>event.directive.startsWith('script-src'))"), "inline script was not blocked");
     assert.equal(await execute("return !!window.__qaInjectedScriptRan"), false);
     await execute("window.__qaCsp=[]");
+    assert.equal(await execute("return document.querySelector('.app-shell').dataset.rightEditor"),"false","right editor initialized during single-pane startup");
   });
   await check("Recovery drafts open safely and can be saved",async()=>{
     await wait(()=>execute("return !!document.querySelector('[aria-label=\"恢复未保存草稿\"]')"),"recovery dialog missing");
@@ -443,6 +462,9 @@ try {
     await click('button[aria-label="关闭容量管理"]');
     await clickText("验收笔记A", "span"); await idle();
   });
+  await productivityChecks({check,click,clickText,type,execute,wait,idle,menu,caretAtParagraphEnd,screenshot,data,qa,call,find});
+  await comfortChecks({check,click,clickText,type,execute,wait,idle,menu,caretAtParagraphEnd,screenshot,data,qa,call});
+  await workflowChecks({check,click,clickText,type,execute,wait,idle,menu,caretAtParagraphEnd,screenshot,data});
   await screenshot("ready");
   await check("Word export through native save dialog", async () => {
     await click('button[title="导出为 Word"]');
@@ -520,6 +542,7 @@ try {
     await wait(()=>execute("const img=document.querySelector('[data-content-type=\"image\"] img');return img?.complete&&img.naturalWidth>0"),"moved attachment did not load");
     await screenshot("relocated-library");
   });
+  await librarySwitchingChecks({check,execute,wait,clickText,click,idle,call,qa,screenshot});
 } catch (error) {
   console.error(String(error));
   try{console.error("Console errors:",await execute("return window.__qaLogs"));}catch{}
@@ -529,7 +552,7 @@ try {
   if (session) {
     try {
       const details = await execute("return {errors:window.__qaErrors,csp:window.__qaCsp}");
-      await writeFile(path.join(qa, "browser-events.json"), JSON.stringify(details, null, 2));
+      if(Array.isArray(details.errors)&&Array.isArray(details.csp))await writeFile(path.join(qa, "browser-events.json"), JSON.stringify(details, null, 2));
     } catch {}
     try { await request("DELETE", "/session/" + session); } catch {}
   }

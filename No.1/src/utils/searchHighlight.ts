@@ -4,7 +4,7 @@ export function clearSearchHighlight() {
   document.querySelectorAll('[data-search-overlay]').forEach(el=>el.remove());
   (globalThis.CSS as any)?.highlights?.delete('note-search');
 }
-export function jumpToMatch(pane:'left'|'right',id:string,query:string) {
+export function jumpToMatch(pane:'left'|'right',id:string,query:string,revealed=false) {
   clearSearchHighlight();
   const root=document.querySelector<HTMLElement>(`[data-editor-pane="${pane}"]`);if(!root)return;
   if(id.startsWith('source:')) {
@@ -14,6 +14,7 @@ export function jumpToMatch(pane:'left'|'right',id:string,query:string) {
   }
   const find=()=>[...root.querySelectorAll<HTMLElement>('[data-id]')].find(el=>el.dataset.id===id);
   const element=find();if(!element)return;
+  if(!element.getClientRects().length&&!revealed){window.dispatchEvent(new CustomEvent("no1:reveal-block",{detail:{pane,id}}));requestAnimationFrame(()=>jumpToMatch(pane,id,query,true));return;}
   // Never add classes to ProseMirror's managed DOM: its observer can interpret
   // that as an edit. The outline lives outside the editor and text uses CSS Highlights.
   const overlay=document.createElement('div');overlay.className='search-hit';overlay.dataset.searchOverlay='true';

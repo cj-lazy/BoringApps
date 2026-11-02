@@ -26,6 +26,42 @@ await build({entryPoints:["src/blocks/schema.ts"],outdir:"artifacts/test-bundles
 const {schema}=await import(pathToFileURL(path.resolve("artifacts/test-bundles/schema.js")).href);
 const {BlockNoteEditor}=await import("@blocknote/core");
 
+test("nested and multi-paragraph lists and quotes remain structured after visual edits",async()=>{
+  const editor=BlockNoteEditor.create({schema});
+  const source="- 第一项\n  - 嵌套项\n\n  第二段正文\n- 末项\n\n> 引用首段\n>\n> 第二引用段\n> - 引用列表\n";
+  replaceNoteDocument(editor,await parseNote(editor,source));
+  assert.equal(editor.document[0].type,"bulletListItem");assert.equal(editor.document[0].children[0].type,"bulletListItem");assert.equal(editor.document[0].children[1].type,"paragraph");
+  const quote=editor.document.find(b=>b.type==="quote");assert.equal(quote.children.length,2);assert.equal(await serializeNote(editor,structuredClone(editor.document)),source);
+  editor.updateBlock(editor.document[0].children[1],{content:"修改第二段"});editor.updateBlock(quote.children[0],{content:"修改引用段"});
+  const saved=await serializeNote(editor,structuredClone(editor.document));replaceNoteDocument(editor,await parseNote(editor,saved));
+  assert.equal(editor.document[0].children[1].content[0].text,"修改第二段");assert.equal(editor.document.filter(b=>b.type==="bulletListItem").length,2);assert.equal(editor.document.find(b=>b.type==="quote").children[0].content[0].text,"修改引用段");
+});
+test("visual footnotes preserve references, rich content and source fidelity",async()=>{
+  const editor=BlockNoteEditor.create({schema}),source="正文[^a] 与 **强调**。\n\n[^a]: 注释首段 **加粗**\n\n    注释第二段\n";
+  replaceNoteDocument(editor,await parseNote(editor,source));const paragraph=editor.document[0],footnote=editor.document.find(b=>b.type==="footnote");
+  assert.ok(paragraph.content.some(c=>c.type==="footnoteRef"));assert.ok(footnote);assert.equal(footnote.children.length,1);assert.equal(await serializeNote(editor,structuredClone(editor.document)),source);
+  editor.updateBlock(footnote.children[0],{content:"修改脚注正文"});const saved=await serializeNote(editor,structuredClone(editor.document));assert.ok(saved.includes("[^a]"));assert.ok(saved.includes("    修改脚注正文"));replaceNoteDocument(editor,await parseNote(editor,saved));assert.equal(editor.document.find(b=>b.type==="footnote").children[0].content[0].text,"修改脚注正文");
+});
+test("stable anchors and live reference blocks survive neighboring edits",async()=>{
+  const editor=BlockNoteEditor.create({schema}),source="<!-- no1:anchor:ref-abc -->\n\n# 标题\n\n![[来源#^ref-def|引用标签]]\n";
+  replaceNoteDocument(editor,await parseNote(editor,source));assert.equal(editor.document[0].type,"noteAnchor");assert.equal(editor.document[2].type,"noteReference");assert.equal(await serializeNote(editor,structuredClone(editor.document)),source);
+  editor.updateBlock(editor.document[1],{content:"修改标题"});const saved=await serializeNote(editor,structuredClone(editor.document));assert.ok(saved.includes("no1:anchor:ref-abc"));assert.ok(saved.includes("![[来源#^ref-def|引用标签]]"));
+});
+
+test("wiki links and properties use the real schema and preserve untouched Markdown",async()=>{
+  const editor=BlockNoteEditor.create({schema});
+  const source="---\ntags: [光学]\ncustom: yes\n---\n\n# 笔记\n\n查看 [[项目/目标#方法|方法说明]]，数学 $a_b$。`[[不要转]]`\n";
+  replaceNoteDocument(editor,await parseNote(editor,source));
+  assert.equal(editor.document[0].type,"noteProperties");
+  const paragraph=editor.document.find(b=>b.type==="paragraph");assert.ok(paragraph.content.some(i=>i.type==="noteLink"));
+  assert.equal(await serializeNote(editor,structuredClone(editor.document)),source);
+  editor.updateBlock(editor.document.find(b=>b.type==="heading"),{content:"改标题"});
+  const saved=await serializeNote(editor,structuredClone(editor.document));assert.ok(saved.includes("[[项目/目标#方法|方法说明]]"));assert.ok(saved.includes("custom: yes"));
+  editor.updateBlock(paragraph,{content:[...paragraph.content,{type:"text",text:"补充文字",styles:{}}]});
+  const changed=await serializeNote(editor,structuredClone(editor.document));assert.ok(changed.includes("[[项目/目标#方法|方法说明]]"));assert.ok(changed.includes("`[[不要转]]`"));assert.ok(changed.includes("a_b"));
+  replaceNoteDocument(editor,await parseNote(editor,changed));assert.ok(editor.document.find(b=>b.type==="paragraph").content.some(i=>i.type==="noteLink"));
+});
+
 for(const calloutType of ["info","warning","error","tip"]) test("real Callout retains editable body, title and type: "+calloutType,async()=>{
   const editor=BlockNoteEditor.create({schema,initialContent:[{type:"callout",props:{title:"中文标题 <safe>",calloutType},content:[{type:"text",text:"保留正文",styles:{bold:true}},{type:"inlineMath",props:{text:encodeURIComponent("a_b")}}]}]});
   const markdown=await serializeNote(editor,editor.document);

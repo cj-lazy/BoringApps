@@ -2,17 +2,30 @@ import { memo } from "react";
 import { BlockNoteView } from "@blocknote/mantine";
 import { getDefaultReactSlashMenuItems, SuggestionMenuController } from "@blocknote/react";
 import { filterSuggestionItems } from "../utils/fileTree";
+import { linkSuggestions } from "../services/knowledgeService";
+import HeadingFolds from "./HeadingFolds";
+import {parseTabularClipboard} from "../utils/editorComfort";
 
 function insertOrReplaceBlock(editor: any, block: any) {
   const current = editor.getTextCursorPosition().block;
   if (Array.isArray(current.content) && !current.content.length) editor.replaceBlocks([current], [block]);
   else editor.insertBlocks([block], current, "after");
 }
-interface Props { editor: any; onChange: any; readOnly: boolean; busy: boolean; showDialog: (type: any, title: string, options?: any) => Promise<any>; source: string | null; onSourceChange: (text: string) => void; }
-export default memo(function NoteEditor({ editor, onChange, readOnly, busy, showDialog, source, onSourceChange }: Props) {
+interface Props { editor: any; onChange: any; readOnly: boolean; busy: boolean; showDialog: (type: any, title: string, options?: any) => Promise<any>; source: string | null; onSourceChange: (text: string) => void;theme:"light"|"dark";pane:"left"|"right";revision:number;onFiles:(files:File[],blockId?:string)=>void; }
+export default memo(function NoteEditor({ editor, onChange, readOnly, busy, showDialog, source, onSourceChange,theme,pane,revision,onFiles }: Props) {
   if (source !== null) return <><textarea autoFocus className="source-editor" aria-label="Markdown 源码" value={source} readOnly={readOnly || busy}
     onChange={event => onSourceChange(event.target.value)} spellCheck={false} /><pre className="source-print">{source}</pre></>;
-  return <BlockNoteView editor={editor} onChange={onChange} theme="light" slashMenu={false} editable={!readOnly && !busy}>
+  return <><HeadingFolds editor={editor} pane={pane} revision={revision}/><BlockNoteView editor={editor} onChange={onChange} theme={theme} slashMenu={false} editable={!readOnly && !busy}
+    onDropCapture={event=>{if(readOnly||busy||event.dataTransfer.files.length<2)return;event.preventDefault();event.stopPropagation();onFiles(Array.from(event.dataTransfer.files),(event.target as HTMLElement).closest<HTMLElement>('[data-id]')?.dataset.id);}}
+    onPasteCapture={event=>{if(readOnly||busy||(event.target as HTMLElement).closest("textarea,input"))return;
+      if(/<table\b/i.test(event.clipboardData.getData("text/html")))return;
+      const grid=parseTabularClipboard(event.clipboardData.getData("text/plain"));if(!grid)return;
+      const current=editor.getTextCursorPosition().block;if(["codeBlock","latex","mermaid","table"].includes(current.type))return;
+      event.preventDefault();event.stopPropagation();insertOrReplaceBlock(editor,{type:"table",content:{type:"tableContent",rows:grid.map(cells=>({cells:cells.map(text=>[{type:"text",text,styles:{}}])}))}});
+    }}>
+                    <SuggestionMenuController triggerCharacter="[[" getItems={async query => (await linkSuggestions(query)).map(item => ({
+                      title:item.title, subtext:item.path, group:"笔记链接", onItemClick:()=>editor.insertInlineContent([{type:"noteLink",props:{target:item.path+(item.heading?"#"+item.heading:""),label:item.heading||item.title}},{type:"text",text:" ",styles:{}}]),
+                    }))}/>
                     <SuggestionMenuController triggerCharacter={"/"} getItems={async (query) => {
                         const defaultItems = getDefaultReactSlashMenuItems(editor);
                         const filteredDefaultItems = defaultItems.filter(i => i.title !== "Code Block");
@@ -77,7 +90,8 @@ export default memo(function NoteEditor({ editor, onChange, readOnly, busy, show
                             icon: <div style={{fontWeight: "bold", fontSize: "16px"}}>💡</div>,
                             subtext: "插入彩色提示框（信息/警告/错误/提示）"
                         };
-                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem, customNumberedList, calloutItem], query);
+                        const workflowItems=([ ["footnote","脚注","footnote jiaozhu"],["reference","段落引用","reference yinyong"],["tasks","任务汇总","tasks daiban"] ] as const).map(([id,title,aliases])=>({title,onItemClick:()=>window.dispatchEvent(new CustomEvent("no1:command",{detail:id})),aliases:aliases.split(" "),group:"笔记工具",icon:<span>↗</span>,subtext:"打开"+title}));
+                        return filterSuggestionItems([...filteredDefaultItems, latexItem, codeItem, mermaidItem, customNumberedList, calloutItem,...workflowItems], query);
                     }} />
-  </BlockNoteView>;
+  </BlockNoteView></>;
 });

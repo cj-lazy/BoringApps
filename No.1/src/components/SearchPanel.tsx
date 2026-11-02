@@ -3,14 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 import Modal from "./Modal";
 import DiffPreview from "./DiffPreview";
 import { planReplacement, safeReplaceOptions, type ReplaceOptions } from "../utils/searchReplace";
+import {refreshKnowledge} from "../services/knowledgeService";
+import type {NoteChange} from "../utils/organizeNotes";
 interface Hit { path:string;line:number;content:string; }
 interface Page { matches:Hit[];has_more:boolean;offset:number;warnings:string[]; }
 interface Preview { path:string;before:string;after:string;count:number; }
-export default function SearchPanel({onClose,onOpen,beforeSearch,onReplace}:{onClose:()=>void;onOpen:(hit:Hit,query:string)=>Promise<void>;beforeSearch:()=>Promise<void>;onReplace:(path:string,before:string,after:string)=>Promise<void>}) {
+export default function SearchPanel({onClose,onOpen,beforeSearch,onReplace,onBatch}:{onClose:()=>void;onOpen:(hit:Hit,query:string)=>Promise<void>;beforeSearch:()=>Promise<void>;onReplace:(path:string,before:string,after:string)=>Promise<void>;onBatch:(changes:NoteChange[])=>Promise<void>}) {
   const [query,setQuery]=useState("");const [replacement,setReplacement]=useState("");const [hits,setHits]=useState<Hit[]>([]);
   const [state,setState]=useState<"idle"|"loading"|"done">("idle");const [more,setMore]=useState(false);
   const [error,setError]=useState("");const [options,setOptions]=useState<ReplaceOptions>(safeReplaceOptions);const [preview,setPreview]=useState<Preview|null>(null);
   const [busy,setBusy]=useState(false);const request=useRef(0);
+  const [batch,setBatch]=useState<Preview[]|null>(null);const [selected,setSelected]=useState<Set<string>>(new Set());
+  const prepareBatch=async()=>{setBusy(true);setError("");try{await beforeSearch();const plans:Preview[]=[];for(const note of await refreshKnowledge()){const plan=await planReplacement(note.source,query,replacement,options);if(plan.changes.length)plans.push({path:note.path,before:note.source,after:plan.content,count:plan.changes.length});}setBatch(plans);setSelected(new Set(plans.map(p=>p.path)));}catch(e){setError(String(e));}finally{setBusy(false);}};
   const search=async(append=false)=>{
     if(!query.trim())return;const id=++request.current;setState("loading");setError("");setPreview(null);
     try{
@@ -28,11 +32,13 @@ export default function SearchPanel({onClose,onOpen,beforeSearch,onReplace}:{onC
   const groups=new Map<string,Hit[]>();for(const hit of hits)groups.set(hit.path,[...(groups.get(hit.path)||[]),hit]);
   return <Modal title="全局搜索与替换" onClose={onClose} wide busy={busy}>
     <form className="search-form" onSubmit={event=>{event.preventDefault();void search();}}>
-      <input autoFocus placeholder="搜索所有笔记内容…" aria-label="全局搜索关键词" value={query} onChange={event=>{request.current++;setQuery(event.target.value);setState("idle");setHits([]);setMore(false);setPreview(null);}}/>
+      <input disabled={busy} autoFocus placeholder="搜索所有笔记内容…" aria-label="全局搜索关键词" value={query} onChange={event=>{request.current++;setQuery(event.target.value);setState("idle");setHits([]);setMore(false);setPreview(null);setBatch(null);}}/>
       <button className="primary" disabled={state==="loading"||busy||!query.trim()}>搜索</button>
     </form>
-    <div className="search-form"><label htmlFor="replacement">替换为</label><input id="replacement" value={replacement} onChange={e=>{setReplacement(e.target.value);setPreview(null);}} placeholder="留空会删除匹配文字"/></div>
-    <div className="option-row"><span>替换时包含：</span>{([["code","代码与 HTML"],["math","公式"],["links","链接地址"]] as const).map(([key,label])=><label key={key}><input type="checkbox" checked={options[key]} onChange={e=>{setOptions(old=>({...old,[key]:e.target.checked}));setPreview(null);}}/>{label}</label>)}</div>
+    <div className="search-form"><label htmlFor="replacement">替换为</label><input disabled={busy} id="replacement" value={replacement} onChange={e=>{setReplacement(e.target.value);setPreview(null);setBatch(null);}} placeholder="留空会删除匹配文字"/></div>
+    <div className="option-row"><span>正文以外还包含：</span>{([["code","代码与 HTML"],["math","公式"],["links","链接目标"],["properties","笔记属性"]] as const).map(([key,label])=><label key={key}><input disabled={busy} type="checkbox" checked={!!options[key]} onChange={e=>{setOptions(old=>({...old,[key]:e.target.checked}));setPreview(null);setBatch(null);}}/>{label}</label>)}</div>
+    <button disabled={busy||!query.trim()} onClick={()=>void prepareBatch()}>预览全库替换</button>
+    {batch&&<div className="batch-replacement"><p>全库共 {batch.length} 篇可替换。提交前将检查每篇原文，遇到冲突会取消整批操作。</p>{batch.map(p=><details key={p.path}><summary><input disabled={busy} type="checkbox" aria-label={"替换 "+p.path} checked={selected.has(p.path)} onClick={e=>e.stopPropagation()} onChange={e=>setSelected(old=>{const next=new Set(old);if(e.target.checked)next.add(p.path);else next.delete(p.path);return next;})}/>{p.path} · {p.count} 处</summary><DiffPreview before={p.before} after={p.after}/></details>)}<footer><button disabled={busy} onClick={()=>setBatch(null)}>关闭批量预览</button><button className="primary" disabled={busy||!selected.size} onClick={async()=>{setBusy(true);try{await onBatch(batch.filter(p=>selected.has(p.path)));setBatch(null);await search();}catch(e){setError(String(e));}finally{setBusy(false);}}}>确认替换所选 {selected.size} 篇笔记</button></footer></div>}
     {error&&<p role="alert" className="error-text">{error}</p>}
     {preview?<>
       <p>{preview.path} · 预计替换 {preview.count} 处</p><DiffPreview before={preview.before} after={preview.after}/>

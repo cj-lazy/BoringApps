@@ -15,6 +15,66 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Template {
+    id: String,
+    name: String,
+    kind: String,
+    content: String,
+    #[serde(default)]
+    source_path: String,
+}
+#[tauri::command]
+pub fn load_templates() -> Result<Vec<Template>, String> {
+    let root = get_data_dir();
+    let path = root.join(".templates.json");
+    ensure_path_within(&root, &path)?;
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("模板文件损坏，原文件已保留：{e}"))
+}
+#[tauri::command]
+pub fn save_templates(templates: Vec<Template>) -> Result<(), String> {
+    let _guard = maintenance::STORAGE_MUTATION
+        .lock()
+        .map_err(|_| "存储锁不可用")?;
+    let mut ids = std::collections::HashSet::new();
+    if templates.len() > 1000 {
+        return Err("模板数量超过限制。".into());
+    }
+    for template in &templates {
+        if template.id.is_empty()
+            || !ids.insert(&template.id)
+            || template.name.trim().is_empty()
+            || !["note", "snippet"].contains(&template.kind.as_str())
+        {
+            return Err("模板名称、类型或编号无效。".into());
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&templates).map_err(|e| e.to_string())?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("模板总大小超过 8 MB，请将大附件保留为链接。".into());
+    }
+    let root = get_data_dir();
+    let path = root.join(".templates.json");
+    ensure_path_within(&root, &path)?;
+    if path.exists() {
+        let old = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        ensure_path_within(&root, &root.join(".backups/templates"))?;
+        storage::save_with_backup(
+            &path,
+            &root.join(".backups/templates"),
+            std::str::from_utf8(&bytes).map_err(|e| e.to_string())?,
+            &old,
+        )
+    } else {
+        storage::write_atomic(&path, &bytes)
+    }
+}
 fn private_path(root: &Path, area: &str, note: &str, suffix: &str) -> Result<PathBuf, String> {
     let base = root.join(area);
     ensure_path_within(root, &base)?;
@@ -79,6 +139,44 @@ fn history_paths(root: &Path, path: &str) -> Result<Vec<String>, String> {
 #[tauri::command]
 pub fn get_library_root() -> String {
     get_data_dir().to_string_lossy().to_string()
+}
+
+#[derive(Serialize)]
+pub struct DiskState {
+    stamp: String,
+    content: Option<String>,
+    missing: bool,
+}
+#[tauri::command]
+pub fn note_disk_state(path: String, known_stamp: Option<String>) -> Result<DiskState, String> {
+    let path = data_note_path(&path)?;
+    let metadata = match fs::metadata(&path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DiskState {
+                stamp: "missing".into(),
+                content: None,
+                missing: true,
+            })
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let modified = metadata
+        .modified()
+        .map_err(|e| e.to_string())?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let stamp = format!("{}:{}", modified.as_nanos(), metadata.len());
+    let content = if known_stamp.as_ref() == Some(&stamp) {
+        None
+    } else {
+        Some(fs::read_to_string(path).map_err(|e| e.to_string())?)
+    };
+    Ok(DiskState {
+        stamp,
+        content,
+        missing: false,
+    })
 }
 
 #[tauri::command]

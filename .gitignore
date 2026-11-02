@@ -2,3 +2,6 @@ No.2/
 
 # Portable note library stored beside the downloadable executable
 /data/
+
+# No.1 portable builds are kept under No.1/release locally
+/portable-note.exe

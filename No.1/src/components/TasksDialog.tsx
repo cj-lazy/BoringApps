@@ -1,0 +1,12 @@
+import {useEffect,useState} from "react";
+import Modal from "./Modal";
+import {refreshKnowledge} from "../services/knowledgeService";
+import {noteTasks,toggleTask,type NoteTask} from "../utils/noteTasks";
+import type {NoteChange} from "../utils/organizeNotes";
+export default function TasksDialog({beforeLoad,onApply,onOpen,onClose,readOnly}:{beforeLoad:()=>Promise<void>;onApply:(c:NoteChange[])=>Promise<void>;onOpen:(path:string,line:number)=>Promise<void>;onClose:()=>void;readOnly:boolean}){
+  const [tasks,setTasks]=useState<NoteTask[]>([]),[query,setQuery]=useState(""),[tag,setTag]=useState(""),[state,setState]=useState("todo"),[busy,setBusy]=useState(false),[error,setError]=useState("");
+  const load=async()=>{setBusy(true);setError("");try{await beforeLoad();setTasks(await noteTasks(await refreshKnowledge()));}catch(e){setError(String(e));}finally{setBusy(false);}};
+  useEffect(()=>{void load();},[]);
+  const visible=tasks.filter(t=>(state==="all"||t.checked===(state==="done"))&&(!tag||t.tags.includes(tag))&&(t.path+" "+t.label).toLowerCase().includes(query.toLowerCase()));
+  return <Modal title="任务汇总" onClose={onClose} wide busy={busy}><div className="search-form"><input aria-label="筛选任务或笔记" placeholder="任务文字或笔记路径" value={query} onChange={e=>setQuery(e.target.value)}/><select aria-label="任务完成状态" value={state} onChange={e=>setState(e.target.value)}><option value="todo">未完成</option><option value="done">已完成</option><option value="all">全部</option></select><select aria-label="任务标签" value={tag} onChange={e=>setTag(e.target.value)}><option value="">全部标签</option>{[...new Set(tasks.flatMap(t=>t.tags))].sort().map(t=><option key={t}>{t}</option>)}</select><button disabled={busy} onClick={()=>void load()}>刷新任务</button></div><p>{visible.length} 项 · 共 {tasks.length} 项。勾选会直接更新原笔记。</p>{error&&<p role="alert">{error}</p>}<div className="task-list">{visible.map(t=><div className="task-row" key={t.path+":"+t.start}><input type="checkbox" aria-label={"完成任务："+t.label} checked={t.checked} disabled={busy||readOnly} onChange={async()=>{setBusy(true);setError("");try{await onApply([toggleTask(t)]);await load();}catch(e){setError(String(e));}finally{setBusy(false);}}}/><button disabled={busy} onClick={async()=>{try{await onOpen(t.path,t.line);onClose();}catch(e){setError(String(e));}}}><span>{t.label}</span><small>{t.path} · L{t.line}</small></button></div>)}{!visible.length&&!busy&&<p className="empty-state">没有符合筛选条件的任务。</p>}</div></Modal>;
+}

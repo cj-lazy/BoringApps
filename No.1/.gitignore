@@ -11,6 +11,8 @@ node_modules
 .tools/
 artifacts/
 /data/
+/release/
+.no1-libraries.json
 .claude/
 .codex/
 .env

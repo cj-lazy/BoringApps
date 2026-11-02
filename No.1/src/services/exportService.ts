@@ -14,7 +14,7 @@ export async function notePackage(source: string, name: string): Promise<Uint8Ar
   zip.file("使用说明.txt","将资料包完整解压。Markdown 与 assets 目录应保留在同一位置。远程网络链接保持原样，需要联网访问。\n");
   return zip.generateAsync({type:"uint8array",compression:"DEFLATE"});
 }
-export async function wordBytes(snapshot: any[], notePath: string) {
+export async function wordBytes(snapshot: any[], notePath: string, layout?: import("../utils/wordLayout").WordLayout) {
     const dataUrlBytes = (url: string) => {
       const match = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/i.exec(url);
       if (!match) return null;
@@ -45,10 +45,20 @@ export async function wordBytes(snapshot: any[], notePath: string) {
       }
       return { data, type, width: dimensions.naturalWidth || 600, height: dimensions.naturalHeight || 400 };
     };
+    const expand=async(blocks:any[]):Promise<any[]>=>{
+      const out:any[]=[];
+      for(const b of blocks){if(b.type==="noteReference"){
+        const [{refreshKnowledge},{resolveNoteLink},{referenceExcerpt}]=await Promise.all([import("./knowledgeService"),import("../utils/knowledge"),import("../utils/noteReferences")]);
+        const notes=await refreshKnowledge(),to=resolveNoteLink(b.props.target,notePath,notes,true),note=notes.find(n=>n.path===to?.path),part=note&&to?await referenceExcerpt(note.source,to.heading):null;
+        if(!part)throw new Error("引用来源不存在，已取消导出："+b.props.target);
+        out.push({type:"rawMarkdown",props:{source:encodeURIComponent(part.source)}});
+      }else out.push({...b,children:await expand(b.children||[])});}return out;
+    };
+    snapshot=await expand(snapshot);
     const { exportWord } = await import("../utils/wordExport");
     const baseName = notePath.split("/").pop()?.replace(/\.md$/i, "") || "笔记";
     const bytes = await exportWord(snapshot, {
-      title: baseName,
+      title: baseName,layout,
       image: toImage,
       diagram: async code => {
         const mermaid = await getMermaid();

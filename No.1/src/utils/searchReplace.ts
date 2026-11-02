@@ -1,6 +1,7 @@
 import { getMarkdownParser } from "./markdownNote.ts";
 import { mathSpans } from "./mathSyntax.ts";
-export interface ReplaceOptions { code: boolean; math: boolean; links: boolean; }
+import { destinationSpan } from "./knowledge.ts";
+export interface ReplaceOptions { code: boolean; math: boolean; links: boolean; properties?: boolean; }
 export const safeReplaceOptions: ReplaceOptions = { code: false, math: false, links: false };
 export interface TextChange { start: number; end: number; before: string; after: string; line: number; }
 export async function planReplacement(source: string, query: string, replacement: string, options = safeReplaceOptions) {
@@ -10,13 +11,18 @@ export async function planReplacement(source: string, query: string, replacement
   const visit = (node: any) => {
     const start = node.position?.start.offset; const end = node.position?.end.offset;
     if (start === undefined || end === undefined) return;
+    if (!options.properties && ["yaml","toml"].includes(node.type)) { excluded.push({start,end});return; }
+    if (node.type === "html" && /<!--\s*no1:anchor:/.test(source.slice(start,end))) { excluded.push({start,end});return; }
     if ((!options.code && ["code", "inlineCode", "html"].includes(node.type)) || (!options.math && ["math", "inlineMath"].includes(node.type))) {
       excluded.push({start,end}); return;
     }
     if (!options.links && typeof node.url === "string") {
-      const raw = source.slice(start,end); const position = raw.indexOf(node.url);
-      // If escapes obscure the destination, keep the whole construct untouched.
-      excluded.push(position >= 0 ? {start:start+position,end:start+position+node.url.length} : {start,end});
+      const span = destinationSpan(source.slice(start,end),node.type === "definition");
+      excluded.push(span ? {start:start+span.start,end:start+span.end} : {start,end});
+    }
+    if (!options.links && node.type === "text") for(const match of source.slice(start,end).matchAll(/\[\[([^\]\r\n|]+)(?:\|[^\]\r\n]*)?\]\]/g)) {
+      const at=start+match.index!;if(at>0&&source[at-1]==="\\")continue;
+      excluded.push({start:at+2,end:at+2+match[1].length});
     }
     node.children?.forEach(visit);
   };

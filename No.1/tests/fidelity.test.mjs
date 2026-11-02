@@ -18,8 +18,10 @@ const { BlockNoteEditor, BlockNoteSchema, defaultBlockSpecs, createBlockSpec, de
 const custom = (type, propSchema) => createBlockSpec({ type, propSchema, content: "none" }, { render: () => ({ dom: document.createElement("div") }) })();
 const schema = BlockNoteSchema.create({ inlineContentSpecs: { ...defaultInlineContentSpecs,
   inlineMath: createInlineContentSpec({ type: "inlineMath", propSchema: { text: { default: "" }, display: { default: false } }, content: "none" }, { render: () => ({ dom: document.createElement("span") }) }),
+  noteLink: createInlineContentSpec({ type: "noteLink", propSchema: { target: {default:""}, label: {default:""} }, content: "none" }, {render:()=>({dom:document.createElement("span")})}),
 }, blockSpecs: { ...defaultBlockSpecs,
   rawMarkdown: custom("rawMarkdown", { source: { default: "" } }),
+  noteProperties: custom("noteProperties", {source: {default:""}}),
   legacyMath: custom("legacyMath", { source: { default: "" } }),
   codeBlock: custom("codeBlock", { text: { default: "" }, language: { default: "text" }, width: { default: "100%" }, height: { default: 300 } }),
   latex: custom("latex", { text: { default: "" } }),

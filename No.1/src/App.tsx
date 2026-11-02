@@ -1,17 +1,19 @@
 import "@blocknote/core/fonts/inter.css";
 import { useCreateBlockNote } from "@blocknote/react";
+import { BlockNoteEditor } from "@blocknote/core";
 import NoteEditor from "./components/NoteEditor";
 import "@blocknote/mantine/style.css";
 import { useEffect, useState, useCallback, useRef, useMemo, lazy, Suspense } from "react";
 import { invoke, convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {listen} from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 
 import "katex/dist/katex.min.css";
 
 import { sortFileTree } from "./utils/fileTree";
-import { parseNote, serializeNote, blockAtSourceLine } from "./utils/markdownNote";
+import { parseNote, serializeNote, blockAtSourceLine, sourcePositionForBlock } from "./utils/markdownNote";
 import { NoteOperationQueue, NoteSession } from "./utils/noteSession";
 import { replaceNoteDocument } from "./utils/installNote";
 import { DocumentIndex } from "./utils/documentIndex";
@@ -25,10 +27,20 @@ import { parseWorkspace, type ReadingOptions } from "./utils/workspace";
 import { jumpToMatch, clearSearchHighlight } from "./utils/searchHighlight";
 import { useDraftProtection } from "./hooks/useDraftProtection";
 import InlineSearch from "./components/InlineSearch";
+import {useTheme,type ThemeChoice} from "./hooks/useTheme";
+import {useTransfer} from "./hooks/useTransfer";
+import {uploadAsset} from "./services/transfers";
+import TransferPanel from "./components/TransferPanel";
+import {portableMarkdown} from "./utils/markdownAssets";
 import Icon from "./components/Icon";
 import FileTree from "./components/FileTree";
+import {filterTreeNodes} from "./utils/virtualTree";
 import Toolbar from "./components/Toolbar";
 import { waitForPreviews } from "./utils/previewQueue";
+import { refreshKnowledge,invalidateKnowledge } from "./services/knowledgeService";
+import type {NoteChange} from "./utils/organizeNotes";
+import { indexNote, planLinkRename, relativeNoteUrl, resolveNoteLink, type Collection } from "./utils/knowledge";
+import type { KnowledgeMode } from "./components/KnowledgeHub";
 import type { Draft } from "./components/RecoveryDialog";
 import type { Conflict } from "./components/ConflictDialog";
 const SearchPanel = lazy(() => import("./components/SearchPanel"));
@@ -38,7 +50,19 @@ const ConflictDialog = lazy(() => import("./components/ConflictDialog"));
 const PreferencesDialog = lazy(() => import("./components/PreferencesDialog"));
 const LibraryDialog = lazy(() => import("./components/LibraryDialog"));
 const StorageDialog = lazy(() => import("./components/StorageDialog"));
+const KnowledgeHub = lazy(() => import("./components/KnowledgeHub"));
+const PropertiesDialog = lazy(() => import("./components/PropertiesDialog"));
+const TemplatesDialog = lazy(() => import("./components/TemplatesDialog"));
+const LibraryManagerDialog = lazy(() => import("./components/LibraryManagerDialog"));
+const AttachmentManager=lazy(()=>import("./components/AttachmentManager"));
 
+import {commandDefinitions,eventChord,bindingFor,commandForChord,parseCommandPreferences,type CommandId} from "./utils/commands";
+import {parseWordLayout} from "./utils/wordLayout";
+import {referenceExcerpt} from "./utils/noteReferences";
+const CommandDialog=lazy(()=>import("./components/CommandDialog"));
+const TasksDialog=lazy(()=>import("./components/TasksDialog"));
+const WordLayoutDialog=lazy(()=>import("./components/WordLayoutDialog"));
+const ReferencesDialog=lazy(()=>import("./components/ReferencesDialog"));
 interface TOCItem {
   id: string;
   text: string;
@@ -93,9 +117,31 @@ function App() {
   const [sourceViews, setSourceViews] = useState<{left:string|null;right:string|null}>({left:null,right:null});
   const sourceRef = useRef(sourceViews); sourceRef.current = sourceViews;
   const appliedSource = useRef<{left:string|null;right:string|null}>({left:null,right:null});
+  const [theme,setTheme]=useState<ThemeChoice>(()=>{const saved=localStorage.getItem("app_theme");return saved==="dark"||saved==="light"?saved:"system";});
+  const resolvedTheme=useTheme(theme);
   const [reading, setReading] = useState<ReadingOptions>({fontSize:16,lineHeight:1.8,width:900});
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [managerOpen, setManagerOpen] = useState(false);
+  const [attachmentsOpen,setAttachmentsOpen]=useState(false);
+  const transfer=useTransfer();
+  const fileInput=useRef<HTMLInputElement>(null);
+  const [libraryRoot, setLibraryRoot] = useState("");
+  const [knowledgeMode, setKnowledgeMode] = useState<KnowledgeMode | null>(null);
+  const [initialCollection,setInitialCollection]=useState<string|null>(null);
+  const [propertiesEdit, setPropertiesEdit] = useState<{pane:"left"|"right";path:string;source:string}|null>(null);
+  const [templateCapture, setTemplateCapture] = useState<{note:string;snippet:string;path:string}|null>(null);
+  const insertion = useRef<{pane:"left"|"right";path:string;blockId:string;from:number;to:number}|null>(null);
+  const [autosaveSeconds,setAutosaveSeconds] = useState(5);
+  const [recent,setRecent] = useState<string[]>([]);
+  const [collections,setCollections] = useState<Collection[]>([]);
+  const [navigation,setNavigation] = useState<{paths:string[];at:number}>({paths:[],at:-1});
+  const navigationRef=useRef(navigation);navigationRef.current=navigation;
+  const replayingNavigation=useRef(false);
+  const [external,setExternal] = useState<{pane:"left"|"right";path:string;disk:string|null}|null>(null);
+  const autoTimers=useRef<Partial<Record<"left"|"right",ReturnType<typeof setTimeout>>>>({});
+  const autoSaveAction=useRef<(pane:"left"|"right",path:string)=>void>(()=>{});
+  const composition=useRef(false);
   const [history, setHistory] = useState<{path:string;content:string;pane:"left"|"right"}|null>(null);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
@@ -104,6 +150,7 @@ function App() {
   const scrollPositions = useRef<Record<string,number>>({});
   const workspaceRef = useRef(parseWorkspace({}));
   const workspaceQueue = useRef(new NoteOperationQueue()).current;
+  const switchingLibrary=useRef(false);
   const [scrollRevision,setScrollRevision] = useState(0);
   const scrollTimer = useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
   const [saveTimes,setSaveTimes] = useState({left:"",right:""});
@@ -121,6 +168,14 @@ function App() {
     }
   });
   const [shortcutPanel, setShortcutPanel] = useState(false);
+  const [commandDialog,setCommandDialog]=useState<"palette"|"settings"|null>(null);
+  const [commands,setCommands]=useState(()=>parseCommandPreferences(null));
+  const [tasksOpen,setTasksOpen]=useState(false);
+  const [wordLayout,setWordLayout]=useState(()=>parseWordLayout(null));
+  const [wordLayoutOpen,setWordLayoutOpen]=useState(false);
+  const [referenceDestination,setReferenceDestination]=useState<{path:string;source:string;offset:number}|null>(null);
+  const runCommandRef=useRef<(id:CommandId)=>void>(()=>{});
+  const commandPosition=useRef<{pane:"left"|"right";path:string;blockId:string;from:number;to:number}|null>(null);
   const [ctxMenu, setCtxMenu] = useState<{x:number;y:number;node:FileNode}|null>(null);
   const [isReadMode, setIsReadMode] = useState(false);
   const [isFocusMode, setIsFocusMode] = useState(false);
@@ -167,12 +222,13 @@ function App() {
       try {
         return await operation();
       } catch (error) {
+        if(String(error).includes("操作已取消")||(error instanceof DOMException&&error.name==="AbortError")){setStatus("已取消");addToast("操作已取消","info");return undefined;}
         console.error(error);
         setStatus(label);
         if (failedPane.current && (String(error).includes("已被其他") || String(error).includes("原文件发生变化"))) {
           const pane = failedPane.current || activePaneRef.current;
           const session = pane === "left" ? leftSession : rightSession;
-          const target = pane === "left" ? editor : editor2;
+          const target = pane === "left" ? editor : getRightEditor();
           if (session.path) try {
             const disk = await invoke<string>("load_note", {path:session.path});
             const ours = sourceRef.current[pane] ?? await serializeNote(target,structuredClone(target.document));
@@ -194,10 +250,9 @@ function App() {
     if (!notePath) { addToast("请先打开一个笔记", "info"); return ""; }
     return await runNoteOperation("上传失败", async () => {
       if (session.path !== notePath) throw new Error("笔记已切换，请重新上传");
-      const fileName = `${crypto.randomUUID()}_${file.name}`;
-      const payload = Array.from(new Uint8Array(await file.arrayBuffer()));
-      const path = await invoke<string>("save_image", { fileName, payload, notePath });
-      return convertFileSrc(path);
+      const result=await transfer.run("导入附件",({signal,onProgress})=>uploadAsset(file,signal,onProgress));
+      if(session.path!==notePath)throw new Error("笔记已切换，附件已保留在库中，请重新选择插入位置。");
+      return resolveAssetUrl(result.url);
     }) ?? "";
   };
   const uploadFile = (file: File) => uploadForPane(file, "left");
@@ -205,7 +260,7 @@ function App() {
   const updateTOC = () => setToc((activePaneRef.current === "left" ? textIndex : rightTextIndex).headings());
   const handleEditorChange = (pane:"left"|"right", context:{getChanges:()=>any[]}) => {
     const session = pane === "left" ? leftSession : rightSession;
-    const target = pane === "left" ? editor : editor2;
+    const target = pane === "left" ? editor : getRightEditor();
     const index = pane === "left" ? textIndex : rightTextIndex;
     if (isLoadingRef.current || !session.path) return;
     const path = session.path, changes = context.getChanges();
@@ -213,6 +268,7 @@ function App() {
     if(pane === "left") updateTabs(tabsRef.current.map(tab=>tab.path===path?{...tab,isDirty:true}:tab));
     else setRightDirty(true);
     setStatus("● 未保存"); draftProtection.schedule(pane,path);
+    scheduleAutosave(pane,path);
     const timer = pane === "left" ? summaryTimer : rightSummaryTimer;
     clearTimeout(timer.current);
     timer.current = setTimeout(()=>{
@@ -227,7 +283,9 @@ function App() {
   const onRightEditorChange = (_editor:any,context:{getChanges:()=>any[]})=>handleEditorChange("right",context);
 
   const editor = useCreateBlockNote({ schema, uploadFile });
-  const editor2 = useCreateBlockNote({ schema, uploadFile: file => uploadForPane(file, "right") });
+  const rightEditor=useRef<typeof editor|null>(null);
+  const rightUpload=useRef((file:File)=>uploadForPane(file,"right"));rightUpload.current=file=>uploadForPane(file,"right");
+  const getRightEditor=()=>rightEditor.current??=BlockNoteEditor.create({schema,uploadFile:file=>rightUpload.current(file)});
   useEffect(()=>{
     if(isNoteBusy||searchOpen||!searchTarget)return;
     const frame=requestAnimationFrame(()=>jumpToMatch(searchTarget.pane,searchTarget.id,searchTarget.query));return()=>cancelAnimationFrame(frame);
@@ -241,7 +299,7 @@ function App() {
   useEffect(()=>{ const index=activePane==="left"?textIndex:rightTextIndex;const source=sourceRef.current[activePane];setWordCount(source===null?index.characters:source.replace(/\s/g,"").length);setToc(index.headings()); },[activePane,documentRevision]);
   const draftProtection = useDraftProtection(async(pane,path)=>{
     try { await noteQueue.run(async()=>{
-      const session=pane==="left"?leftSession:rightSession;const target=pane==="left"?editor:editor2;
+      const session=pane==="left"?leftSession:rightSession;const target=pane==="left"?editor:getRightEditor();
       if(session.path!==path||!paneIsDirty(pane))return;
       const content=sourceRef.current[pane]??await serializeNote(target,structuredClone(target.document));
       await invoke("save_draft",{path,content,baseSource:session.source,draftId:draftIds.current[pane]});
@@ -249,25 +307,32 @@ function App() {
     }); } catch(error){addToast("恢复草稿保存失败："+String(error),"error");}
   });
   const paneIsDirty=(pane:"left"|"right")=>{
-    const session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:editor2;
+    const session=pane==="left"?leftSession:rightSession;
+    if(!session.path)return false;
+    const target=pane==="left"?editor:getRightEditor();
     return session.isDirty(target.document)||(sourceRef.current[pane]!==null&&sourceRef.current[pane]!==appliedSource.current[pane]);
+  };
+  const scheduleAutosave=(pane:"left"|"right",path:string)=>{
+    clearTimeout(autoTimers.current[pane]);
+    if(!autosaveSeconds)return;
+    autoTimers.current[pane]=setTimeout(()=>{delete autoTimers.current[pane];autoSaveAction.current(pane,path);},autosaveSeconds*1000);
   };
   const changeSource=(pane:"left"|"right",text:string)=>{
     const next={...sourceRef.current,[pane]:text};sourceRef.current=next;setSourceViews(next);
     const path=(pane==="left"?leftSession:rightSession).path;
-    if(path){if(pane==="left")updateTabs(tabsRef.current.map(t=>t.path===path?{...t,isDirty:true}:t));else setRightDirty(true);draftProtection.schedule(pane,path);}
+    if(path){if(pane==="left")updateTabs(tabsRef.current.map(t=>t.path===path?{...t,isDirty:true}:t));else setRightDirty(true);draftProtection.schedule(pane,path);scheduleAutosave(pane,path);}
     setDocumentRevision(v=>v+1);setStatus("● 未保存");
   };
   const applySource=async(pane:"left"|"right")=>{
     const source=sourceRef.current[pane];if(source===null||source===appliedSource.current[pane])return;
-    const target=pane==="left"?editor:editor2,session=pane==="left"?leftSession:rightSession;
+    const target=pane==="left"?editor:getRightEditor(),session=pane==="left"?leftSession:rightSession;
     const blocks=await parseNote(target,source);isLoadingRef.current=true;
     try {replaceNoteDocument(target,blocks);session.replaceDocument(target.document);(pane==="left"?textIndex:rightTextIndex).reset(target.document);appliedSource.current[pane]=source;setDocumentRevision(v=>v+1);}
     finally {isLoadingRef.current=false;}
   };
   const toggleSource=()=>runNoteOperation("切换源码视图失败",async()=>{
     setSearchTarget(null);clearSearchHighlight();
-    const pane=activePaneRef.current;const target=pane==="left"?editor:editor2;
+    const pane=activePaneRef.current;const target=pane==="left"?editor:getRightEditor();
     if(sourceRef.current[pane]===null){const source=await serializeNote(target,structuredClone(target.document));appliedSource.current[pane]=source;const next={...sourceRef.current,[pane]:source};sourceRef.current=next;setSourceViews(next);}
     else {await applySource(pane);const next={...sourceRef.current,[pane]:null};sourceRef.current=next;setSourceViews(next);}
   });
@@ -285,8 +350,10 @@ function App() {
   };
   
   const persistPane = async (pane: "left" | "right") => {
+    clearTimeout(autoTimers.current[pane]); delete autoTimers.current[pane];
     const session = pane === "left" ? leftSession : rightSession;
-    const targetEditor = pane === "left" ? editor : editor2;
+    if(!session.path)return;
+    const targetEditor = pane === "left" ? editor : getRightEditor();
     await applySource(pane);
     draftProtection.cancel(pane);
     const saved = await session.save(
@@ -302,12 +369,28 @@ function App() {
     }
     if (isDirty) throw new Error("保存期间有新的修改，已保留在编辑器中，请再次保存");
     if (saved) {
+      invalidateKnowledge();
       setSaveTimes(old=>({...old,[pane]:new Date().toLocaleTimeString("zh-CN", { hour12: false })}));
       setStatus("已保存");
+      setExternal(old=>old?.path===session.path?null:old);
     }
     if(session.path && !isDirty) { await invoke("clear_draft",{path:session.path,draftId:draftIds.current[pane]});setDraftTimes(old=>({...old,[pane]:""}));setDrafts(old=>old.filter(d=>d.path!==session.path||d.id!==draftIds.current[pane])); }
     // Removed attachments are retained: undo and other notes may still use them.
   };
+  autoSaveAction.current=(pane,path)=>{
+    const session=pane==="left"?leftSession:rightSession;
+    if(session.path!==path||!paneIsDirty(pane))return;
+    if(composition.current||pendingOperationsRef.current||document.querySelector('[role="dialog"]')||external?.path===path){scheduleAutosave(pane,path);return;}
+    void runNoteOperation("自动保存失败",async()=>{if(session.path===path&&paneIsDirty(pane)){setStatus("正在保存…");await persistPane(pane);}});
+  };
+  useEffect(()=>{
+    const start=()=>{composition.current=true;},end=()=>{composition.current=false;};
+    window.addEventListener("compositionstart",start);window.addEventListener("compositionend",end);
+    return()=>{window.removeEventListener("compositionstart",start);window.removeEventListener("compositionend",end);Object.values(autoTimers.current).forEach(clearTimeout);};
+  },[]);
+  useEffect(()=>{
+    for(const pane of ["left","right"] as const){clearTimeout(autoTimers.current[pane]);const session=pane==="left"?leftSession:rightSession;if(autosaveSeconds&&session.path&&paneIsDirty(pane))scheduleAutosave(pane,session.path);}
+  },[autosaveSeconds]);
 
   const saveCurrentNote = () => runNoteOperation("保存失败", () => persistPane("left"));
   const saveRightNote = () => runNoteOperation("右侧笔记保存失败", () => persistPane("right"));
@@ -329,9 +412,12 @@ function App() {
   });
 
   const installDocument = (pane: "left" | "right", path: string | null, content: string, blocks: any[]) => {
-    const targetEditor = pane === "left" ? editor : editor2;
+    if(pane==="right"&&!path&&!rightEditor.current){setRightFile(null);setRightDirty(false);return;}
+    const targetEditor = pane === "left" ? editor : getRightEditor();
     const session = pane === "left" ? leftSession : rightSession;
     draftProtection.cancel(pane);
+    clearTimeout(autoTimers.current[pane]);delete autoTimers.current[pane];
+    setExternal(old=>old?.pane===pane?null:old);
     const nextSource={...sourceRef.current,[pane]:null};sourceRef.current=nextSource;setSourceViews(nextSource);appliedSource.current[pane]=null;
     setDraftTimes(old=>({...old,[pane]:""}));setSaveTimes(old=>({...old,[pane]:""}));
     clearSearchHighlight();
@@ -364,13 +450,18 @@ function App() {
       isLoadingRef.current = false;
     }
   };
+  const rememberVisit=(path:string)=>{
+    setRecent(old=>[path,...old.filter(p=>p!==path)].slice(0,100));
+    if(!replayingNavigation.current)setNavigation(old=>old.paths[old.at]===path?old:{paths:[...old.paths.slice(0,old.at+1),path].slice(-100),at:Math.min(old.at+1,99)});
+  };
 
   const openPane = async (pane: "left" | "right", path: string) => {
     const content = await invoke<string>("load_note", { path });
-    const targetEditor = pane === "left" ? editor : editor2;
+    const targetEditor = pane === "left" ? editor : getRightEditor();
     const blocks = await parseNote(targetEditor, content);
     if (paneIsDirty(pane)) throw new Error("加载期间有新的修改，已取消切换");
     installDocument(pane, path, content, blocks);
+    rememberVisit(path);
     requestAnimationFrame(()=>requestAnimationFrame(()=>{
       const host=document.querySelector<HTMLElement>(`[data-editor-pane="${pane}"]`);if(host)host.scrollTop=scrollPositions.current[path]||0;
     }));
@@ -434,37 +525,34 @@ function App() {
       if(e.defaultPrevented || document.querySelector('[role="dialog"]')) return;
       const mod = e.ctrlKey || e.metaKey;
       const target = e.target instanceof HTMLElement ? e.target : null;
-      const activeEditor = activePaneRef.current === "right" ? editor2 : editor;
-      if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); void saveAllNotes(); }
-      else if (mod && e.key === 'k') { e.preventDefault(); setIsSidebarOpen(true); setTimeout(() => sidebarSearchRef.current?.focus(), 100); }
-      else if (mod && e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); setSearchOpen(true); }
-      else if (mod && e.key === 'f' && !e.shiftKey) {
-        e.preventDefault();
-        setSearchTarget(null);setInlineSearchOpen(true);
-      }
+      const activeEditor = activePaneRef.current === "right" ? getRightEditor() : editor;
+      const command=commandForChord(eventChord(e),commands);
+      if(command){e.preventDefault();runCommandRef.current(command);}
       else if (mod && e.key.toLowerCase() === 'z' && !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
         if(isReadMode){e.preventDefault();return;}
         if (pendingOperationsRef.current) return;
         e.preventDefault();
         if (e.shiftKey) activeEditor.redo(); else activeEditor.undo();
       }
-      else if (mod && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); setIsFocusMode(prev => !prev); }
       else if (e.key === 'Escape') { setSearchOpen(false); setInlineSearchOpen(false); setSearchTarget(null);clearSearchHighlight(); setShortcutPanel(false); setCtxMenu(null); }
       else if (e.key === '?' && !mod && !target?.isContentEditable && !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) { e.preventDefault(); setShortcutPanel(true); }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   });
+  useEffect(()=>{const run=(e:Event)=>{const id=(e as CustomEvent<CommandId>).detail;if(commandDefinitions.some(c=>c[0]===id))runCommandRef.current(id);};window.addEventListener("no1:command",run);return()=>window.removeEventListener("no1:command",run);},[]);
   const silentGC = async () => { try { await invoke("gc_unused_assets"); } catch (e) { console.warn(e); } };
   useEffect(() => {
     let cancelled=false;
     void (async()=>{
       try {
-        const root=await invoke<string>("get_library_root");configureAssetLinks(root,convertFileSrc);
+        const root=await invoke<string>("get_library_root");configureAssetLinks(root,convertFileSrc);setLibraryRoot(root);
+        const libraryStatus=await invoke<{warning:string|null}>("library_status");if(libraryStatus.warning)addToast(libraryStatus.warning,"error");
         const tree=await invoke<FileNode[]>("get_file_tree");if(cancelled)return;setFileTree(tree);
         let raw:any={};try{raw=await invoke("load_workspace");}catch(error){addToast(String(error),"error");}
         const existing=new Set<string>();const visit=(nodes:FileNode[])=>nodes.forEach(n=>n.is_dir?visit(n.children):existing.add(n.path));visit(tree);
         const workspace=parseWorkspace(raw);scrollPositions.current=workspace.scroll;
+        setAutosaveSeconds(workspace.autosaveSeconds);setTheme(workspace.theme);setRecent(workspace.recent);setCollections(workspace.collections);setCommands(workspace.commands);setWordLayout(workspace.wordLayout);
         if(!raw || typeof raw!=="object" || !Object.keys(raw).length){workspace.favorites=[...favPaths];workspace.background={url:bgImage,opacity:bgOpacity,blur:bgBlur};}
         setFavPaths(new Set(workspace.favorites.filter(p=>existing.has(p))));setReading(workspace.reading);
         setSidebarWidth(workspace.sidebarWidth);setIsSidebarOpen(workspace.sidebarOpen);setIsTocOpen(workspace.tocOpen);setSplitRatio(workspace.splitRatio);setExpandedFolders(new Set(workspace.expandedFolders));
@@ -479,30 +567,23 @@ function App() {
         if(!cancelled){setDrafts(pending);setRecoveryOpen(!!pending.length);}
         await silentGC();
       }catch(error){addToast("初始化失败："+String(error),"error");}
-      finally{if(!cancelled)setWorkspaceReady(true);}
+      finally{if(!cancelled){setWorkspaceReady(true);performance.mark("no1-ready");}}
     })();return()=>{cancelled=true;};
   }, []);
-  workspaceRef.current=parseWorkspace({favorites:[...favPaths],tabs:tabs.map(t=>t.path),activePath:currentFile,rightFile,splitMode:isSplitMode,sidebarWidth,sidebarOpen:isSidebarOpen,tocOpen:isTocOpen,splitRatio,expandedFolders:[...expandedFolders],scroll:scrollPositions.current,reading,background:{url:bgImage?storedAssetUrl(bgImage):null,opacity:bgOpacity,blur:bgBlur}});
+  workspaceRef.current=parseWorkspace({commands,wordLayout,favorites:[...favPaths],tabs:tabs.map(t=>t.path),activePath:currentFile,rightFile,splitMode:isSplitMode,sidebarWidth,sidebarOpen:isSidebarOpen,tocOpen:isTocOpen,splitRatio,expandedFolders:[...expandedFolders],scroll:scrollPositions.current,reading,theme,autosaveSeconds,recent,collections,background:{url:bgImage?storedAssetUrl(bgImage):null,opacity:bgOpacity,blur:bgBlur}});
   useEffect(()=>{
-    if(!workspaceReady)return;const timer=setTimeout(()=>{const value=workspaceRef.current;void workspaceQueue.run(()=>invoke("save_workspace",{value})).catch(error=>addToast("工作区设置保存失败："+String(error),"error"));},500);
+    if(!workspaceReady)return;const timer=setTimeout(()=>{if(switchingLibrary.current)return;const value=workspaceRef.current;void workspaceQueue.run(()=>{if(switchingLibrary.current)return Promise.resolve();return invoke("save_workspace",{value});}).catch(error=>addToast("工作区设置保存失败："+String(error),"error"));},500);
     return()=>clearTimeout(timer);
-  },[workspaceReady,favPaths,tabs,currentFile,rightFile,isSplitMode,sidebarWidth,isSidebarOpen,isTocOpen,splitRatio,expandedFolders,reading,bgImage,bgOpacity,bgBlur,scrollRevision]);
+  },[workspaceReady,favPaths,tabs,currentFile,rightFile,isSplitMode,sidebarWidth,isSidebarOpen,isTocOpen,splitRatio,expandedFolders,reading,bgImage,bgOpacity,bgBlur,scrollRevision,autosaveSeconds,recent,collections,theme,commands,wordLayout]);
   useEffect(()=>()=>clearTimeout(scrollTimer.current),[]);
   const rememberScroll=(pane:"left"|"right",element:HTMLElement)=>{
     const path=(pane==="left"?leftSession:rightSession).path;if(!path)return;scrollPositions.current[path]=element.scrollTop;
     clearTimeout(scrollTimer.current);scrollTimer.current=setTimeout(()=>setScrollRevision(v=>v+1),300);
   };
 
-  const filterNodes = (nodes: FileNode[], term: string): FileNode[] => {
-    if (!term) return nodes;
-    return nodes.map(node => {
-      if (node.is_dir) { const children = filterNodes(node.children, term); if (children.length > 0 || node.name.toLowerCase().includes(term.toLowerCase())) return { ...node, children }; return null; }
-      return node.name.toLowerCase().includes(term.toLowerCase()) ? node : null;
-    }).filter(Boolean) as FileNode[];
-  };
 
   const displayedTree = useMemo(() => {
-      const filtered = filterNodes(fileTree, searchTerm);
+      const filtered = filterTreeNodes(fileTree, searchTerm);
       return sortFileTree(filtered);
   }, [fileTree, searchTerm]);
   
@@ -531,7 +612,8 @@ function App() {
   const renameItem = (node: FileNode, newPath: string) => runNoteOperation("移动或重命名失败", async () => {
     await persistPane("left");
     await persistPane("right");
-    await invoke("rename_item", { oldPath: node.path, newPath, isDir: node.is_dir });
+    const changes=planLinkRename(await refreshKnowledge(true),node.path,newPath,node.is_dir);
+    await invoke("rename_item", { oldPath: node.path, newPath, isDir: node.is_dir, changes });
     const remap = (path: string) => matchesPath(path, node.path, node.is_dir)
       ? newPath + path.slice(node.path.length) : path;
     if (leftSession.path) leftSession.path = remap(leftSession.path);
@@ -551,6 +633,8 @@ function App() {
       return next;
     });
     await refreshTree();
+    if(leftSession.path)await openPane("left",leftSession.path);
+    if(rightSession.path)await openPane("right",rightSession.path);
   });
 
   const handleMove = async (e: React.MouseEvent, node: FileNode) => {
@@ -635,8 +719,155 @@ function App() {
     if(!result)throw new Error("操作未完成，请先处理提示后重试。");
   };
   const beforeSearch=()=>perform("保存失败",async()=>{await persistPane("left");await persistPane("right");});
+  const applyNoteChanges=(changes:NoteChange[])=>perform("整理笔记失败",async()=>{
+    if(isReadMode)throw new Error("请先切换到编辑模式再整理笔记。");
+    await persistPane("left");await persistPane("right");
+    await invoke("apply_note_changes",{changes});invalidateKnowledge();
+    if(leftSession.path&&changes.some(c=>c.path===leftSession.path))await openPane("left",leftSession.path);
+    if(rightSession.path&&changes.some(c=>c.path===rightSession.path))await openPane("right",rightSession.path);
+  });
+  const showQuickCapture=async()=>{try{await beforeSearch();await invoke("show_capture_window");}catch(error){addToast("打开快速记录失败："+String(error),"error");}};
+  const openDaily=async()=>{try{await beforeSearch();const now=new Date(),day=[now.getFullYear(),String(now.getMonth()+1).padStart(2,"0"),String(now.getDate()).padStart(2,"0")].join("-");const path=await invoke<string>("ensure_daily_note",{day});await refreshTree();await openSearchHit({path,line:1,content:""},"");}catch(error){addToast("打开今日笔记失败："+String(error),"error");}};
+  const captureEvent=useRef<(path:string,open:boolean)=>void>(()=>{});captureEvent.current=(path,open)=>{invalidateKnowledge();void refreshTree();if(open)void openSearchHit({path,line:1,content:""},"").catch(error=>addToast(String(error),"error"));else addToast("快速记录已保存","success");};
+  useEffect(()=>{if(!isTauri())return;let stopped=false;const cleanups:(()=>void)[]=[];void Promise.all([listen<{path:string}>("note-captured",event=>captureEvent.current(event.payload.path,false)),listen<string>("open-captured-note",event=>captureEvent.current(event.payload,true))]).then(list=>{if(stopped)list.forEach(stop=>stop());else cleanups.push(...list);});return()=>{stopped=true;cleanups.forEach(stop=>stop());};},[]);
+  const navigateHistory=async(direction:number)=>{
+    const nav=navigationRef.current,next=nav.at+direction;
+    if(next<0||next>=nav.paths.length||pendingOperationsRef.current)return;
+    replayingNavigation.current=true;
+    try{await openSearchHit({path:nav.paths[next],line:1,content:""},"");setNavigation(old=>({...old,at:next}));}
+    catch(error){addToast(String(error),"error");}
+    finally{replayingNavigation.current=false;}
+  };
+  const prepareInsertion=()=>{
+    const pane=activePaneRef.current,session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:getRightEditor();
+    if(!session.path)throw new Error("请先打开笔记。");
+    const selection=target._tiptapEditor.state.selection;
+    insertion.current={pane,path:session.path,blockId:target.getTextCursorPosition().block.id,from:selection.from,to:selection.to};
+  };
+  const handleProperties=()=>runNoteOperation("打开属性失败",async()=>{const pane=activePaneRef.current;await persistPane(pane);const session=pane==="left"?leftSession:rightSession;if(session.path)setPropertiesEdit({pane,path:session.path,source:session.source});});
+  const handleTemplates=()=>runNoteOperation("打开模板失败",async()=>{
+    const pane=activePaneRef.current,session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:getRightEditor();
+    if(session.path)prepareInsertion();else insertion.current=null;
+    const chosen=sourceRef.current[pane]===null&&session.path?(target.getSelection()?.blocks||[target.getTextCursorPosition().block]):[];
+    await persistPane(pane);
+    const scratch={blocksToMarkdownLossy:(blocks:any[])=>target.blocksToMarkdownLossy(blocks),tryParseMarkdownToBlocks:(source:string)=>target.tryParseMarkdownToBlocks(source)};
+    const snippet=chosen.length?await serializeNote(scratch,structuredClone(chosen)):"";
+    setTemplateCapture({note:session.source,snippet,path:session.path||""});
+  });
+  const handleInsertLink=()=>{try{prepareInsertion();setKnowledgeMode("link");}catch(e){addToast(String(e),"info");}};
+  const chooseAttachments=()=>{try{if(isReadMode)throw new Error("请先切换到编辑模式。");prepareInsertion();fileInput.current?.click();}catch(e){addToast(String(e),"info");}};
+  const dropAttachments=(pane:"left"|"right",files:File[],blockId?:string)=>{activePaneRef.current=pane;setActivePane(pane);try{prepareInsertion();if(blockId&&insertion.current)insertion.current.blockId=blockId;void importAttachments(files);}catch(error){addToast(String(error),"error");}};
+  const importAttachments=(files:File[])=>runNoteOperation("导入附件失败",async()=>{
+    const position=insertion.current;if(!position)return;
+    const target=position.pane==="left"?editor:getRightEditor(),session=position.pane==="left"?leftSession:rightSession;
+    if(session.path!==position.path||sourceRef.current[position.pane]!==null)throw new Error("请回到原笔记的块编辑视图后重试。");
+    await transfer.run("批量导入附件",async({signal,onProgress})=>{
+      const total=files.reduce((sum,f)=>sum+f.size,0);let completed=0,count=0,reused=0,anchor=position.blockId;
+      try{for(const file of files){signal.throwIfAborted();const asset=await uploadAsset(file,signal,p=>onProgress({...p,completed:completed+p.completed,total}));if(session.path!==position.path)throw new Error("笔记已切换，请重新导入。");
+        const inserted=target.insertBlocks([{type:file.type.startsWith("image/")?"image":"file",props:{name:file.name,url:resolveAssetUrl(asset.url)}}],anchor,"after");anchor=inserted[0].id;completed+=file.size;count++;if(asset.reused)reused++;
+      }}catch(error){if(!signal.aborted)throw error;setStatus("导入已取消");}finally{if(count)await persistPane(position.pane);}
+      if(signal.aborted){setStatus("导入已取消");addToast(`导入已取消，已保留 ${count} 个完成的附件`,"info");}
+      else addToast(`已导入 ${count} 个附件${reused?`，其中 ${reused} 个复用了已有内容`:""}`,"success");
+    });
+  });
+  const insertLink=(path:string,heading:string)=>perform("插入链接失败",async()=>{
+    const saved=insertion.current;if(!saved||isReadMode)throw new Error("请回到编辑模式并重新选择插入位置。");
+    const target=saved.pane==="left"?editor:getRightEditor(),session=saved.pane==="left"?leftSession:rightSession;
+    if(session.path!==saved.path)throw new Error("笔记已切换，请重新插入。");
+    if(sourceRef.current[saved.pane]!==null)throw new Error("请先切换到块编辑视图。");
+    target._tiptapEditor.commands.setTextSelection({from:saved.from,to:saved.to});
+    target.insertInlineContent([{type:"noteLink",props:{target:path+(heading?"#"+heading:""),label:heading||path.split("/").pop()!}}]);
+    setActivePane(saved.pane);
+  });
+  const rebaseTemplate=async(source:string,origin:string,destination:string)=>{
+    if(!origin||origin===destination)return source;
+    const existing=await refreshKnowledge();const template=await indexNote({path:origin,source,stamp:"",modified_ms:0});
+    let result=source;const edits:{start:number;end:number;text:string}[]=[];
+    for(const link of template.links){if(link.wiki||link.start<0)continue;const to=resolveNoteLink(link.target,origin,existing,false);if(to)edits.push({start:link.start,end:link.end,text:relativeNoteUrl(destination,to.path,to.heading)});}
+    for(const edit of edits.sort((a,b)=>b.start-a.start))result=result.slice(0,edit.start)+edit.text+result.slice(edit.end);
+    return result;
+  };
+  const createFromTemplate=(name:string,source:string,origin:string)=>perform("从模板创建失败",async()=>{
+    if(/[\\/]/.test(name))throw new Error("笔记名称不能包含路径分隔符。");
+    await persistPane("left");
+    const path=selectedFolder?selectedFolder+"/"+name:name;const content=await rebaseTemplate(source,origin,path);
+    const blocks=await parseNote(editor,content);
+    await invoke("create_note",{path});
+    await invoke("save_note",{path,content,expectedContent:""});
+    installDocument("left",path,content,blocks);rememberVisit(path);setActivePane("left");await refreshTree();
+  });
+  const insertSnippet=(source:string,origin:string)=>perform("插入片段失败",async()=>{
+    const saved=insertion.current;if(!saved||isReadMode)throw new Error("请先在编辑模式选择插入位置。");
+    const target=saved.pane==="left"?editor:getRightEditor(),session=saved.pane==="left"?leftSession:rightSession;
+    if(session.path!==saved.path||sourceRef.current[saved.pane]!==null)throw new Error("请回到原笔记的块编辑视图后重试。");
+    const content=await rebaseTemplate(source,origin,saved.path);const blocks=await parseNote(target,content);
+    target.insertBlocks(blocks.filter(b=>b.type!=="noteProperties"),saved.blockId,"after");setActivePane(saved.pane);
+  });
+  const switchLibrary=(path:string)=>perform("切换笔记库失败",async()=>{
+    switchingLibrary.current=true;
+    try{
+      await persistPane("left");await persistPane("right");
+      await workspaceQueue.run(()=>invoke("save_workspace",{value:workspaceRef.current}));
+      await invoke("switch_library",{path});window.location.reload();
+    }catch(error){switchingLibrary.current=false;throw error;}
+  });
+  const linkAction=useRef<(target:string,pane:"left"|"right",wiki:boolean)=>Promise<void>>(async()=>{});
+  linkAction.current=async(target,pane,wiki)=>{
+    try{
+      const from=(pane==="left"?leftSession:rightSession).path;if(!from)return;
+      const notes=await refreshKnowledge();const to=resolveNoteLink(target,from,notes,wiki);
+      if(!to){addToast("链接目标不存在或存在同名笔记，请通过“插入笔记链接”选择完整路径。","info");return;}
+      const note=notes.find(n=>n.path===to.path)!;
+      const excerpt=to.heading?await referenceExcerpt(note.source,to.heading):null;
+      if(to.heading.startsWith("^")&&!excerpt)throw new Error("段落定位标记已删除，请重新选择来源。");
+      await openSearchHit({path:to.path,line:excerpt?.line||note.headings.find(h=>h.text===to.heading||h.text.toLowerCase().replace(/\s+/g,"-")===to.heading)?.line||1,content:to.heading},to.heading.startsWith("^")?"":to.heading);
+    }catch(error){addToast("打开链接失败："+String(error),"error");}
+  };
+  useEffect(()=>{
+    const custom=(event:Event)=>{const detail=(event as CustomEvent<{target:string;pane?:"left"|"right"}>).detail;void linkAction.current(detail.target,detail.pane||activePaneRef.current,true);};
+    const click=(event:MouseEvent)=>{
+      const element=event.target instanceof Element?event.target.closest<HTMLAnchorElement>("a[href]"):null;
+      if(!element||element.classList.contains("note-link"))return;
+      const pane=element.closest<HTMLElement>("[data-editor-pane]")?.dataset.editorPane as "left"|"right"|undefined;
+      const href=element.getAttribute("href")||"";
+      if(pane&&!/^[a-z][a-z\d+.-]*:/i.test(href)&&(/\.md(?:#|$)/i.test(href)||href.startsWith("#"))){event.preventDefault();event.stopPropagation();void linkAction.current(href,pane,false);}
+    };
+    const properties=()=>void handlePropertiesAction.current();
+    window.addEventListener("no1:open-link",custom);window.addEventListener("click",click,true);window.addEventListener("no1:properties",properties);
+    return()=>{window.removeEventListener("no1:open-link",custom);window.removeEventListener("click",click,true);window.removeEventListener("no1:properties",properties);};
+  },[]);
+  const handlePropertiesAction=useRef<()=>unknown>(()=>{});handlePropertiesAction.current=handleProperties;
+  const diskSeen=useRef<Partial<Record<"left"|"right",{path:string;source:string;stamp:string}>>>({});
+  const pollExternal=useRef<()=>Promise<void>>(async()=>{});
+  pollExternal.current=async()=>{
+    if(!workspaceReady||pendingOperationsRef.current||composition.current||document.querySelector('[role="dialog"]'))return;
+    await noteQueue.run(async()=>{
+      for(const pane of ["left","right"] as const){
+        const session=pane==="left"?leftSession:rightSession,path=session.path;if(!path)continue;
+        const seen=diskSeen.current[pane],same=seen?.path===path&&seen.source===session.source;
+        const state=await invoke<{stamp:string;content:string|null;missing:boolean}>("note_disk_state",{path,knownStamp:same?seen.stamp:null});
+        if(session.path!==path)continue;
+        if(state.missing){setExternal(old=>old?.path===path&&old.disk===null?old:{pane,path,disk:null});clearTimeout(autoTimers.current[pane]);continue;}
+        if(state.content===null)continue;
+        diskSeen.current[pane]={path,source:session.source,stamp:state.stamp};
+        if(state.content!==session.source){
+          clearTimeout(autoTimers.current[pane]);
+          if(!paneIsDirty(pane)){
+            const target=pane==="left"?editor:getRightEditor(),source=state.content,blocks=await parseNote(target,source);
+            if(paneIsDirty(pane)){setExternal({pane,path,disk:source});continue;}
+            installDocument(pane,path,source,blocks);setStatus("已载入外部修改");setExternal(old=>old?.path===path?null:old);await refreshTree();
+          }else setExternal({pane,path,disk:state.content});
+        }
+      }
+    });
+  };
+  useEffect(()=>{
+    let checking=false;const check=()=>{if(checking||document.visibilityState!=="visible")return;checking=true;void pollExternal.current().catch(error=>console.warn("外部文件检查失败",error)).finally(()=>{checking=false;});};
+    const timer=setInterval(check,3000);const focus=()=>{check();void refreshTree();};window.addEventListener("focus",focus);
+    return()=>{clearInterval(timer);window.removeEventListener("focus",focus);};
+  },[]);
   const applyText=async(pane:"left"|"right",content:string)=>{
-    const session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:editor2;
+    const session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:getRightEditor();
     if(!session.path)throw new Error("未打开笔记");
     const blocks=await parseNote(target,content);
     await invoke("save_note",{path:session.path,content,expectedContent:session.source});
@@ -645,7 +876,7 @@ function App() {
   const replaceInNote=(path:string,before:string,after:string)=>perform("替换失败",async()=>{
     await persistPane("left");await persistPane("right");
     const pane=leftSession.path===path?"left":rightSession.path===path?"right":null;
-    const target=pane==="right"?editor2:editor;
+    const target=pane==="right"?getRightEditor():editor;
     const blocks=pane?await parseNote(target,after):null;
     await invoke("save_note",{path,content:after,expectedContent:before});
     if(pane&&blocks)installDocument(pane,path,after,blocks);
@@ -655,7 +886,7 @@ function App() {
     let pane:"left"|"right"=rightSession.path===hit.path?"right":"left";
     if(pane==="left"&&leftSession.path!==hit.path){await persistPane("left");await openPane("left",hit.path);}
     if(pane==="right")setIsSplitMode(true);setActivePane(pane);
-    const target=pane==="left"?editor:editor2,index=pane==="left"?textIndex:rightTextIndex;
+    const target=pane==="left"?editor:getRightEditor(),index=pane==="left"?textIndex:rightTextIndex;
     const candidate=blockAtSourceLine(target,hit.line);
     const matches=index.search(query);const id=matches.find(m=>m.blockId===candidate)?.blockId||matches.find(m=>hit.content.includes(m.text))?.blockId||matches[0]?.blockId||candidate;
     if(id)setSearchTarget({pane,id,query});
@@ -721,24 +952,24 @@ function App() {
     finally{clearTimeout(timeout);setPrinting(false);delete document.documentElement.dataset.preparingPrint;}
   });
   const handleExportPackage=()=>runNoteOperation("导出资料包失败",async()=>{
-    const pane=activePaneRef.current,session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:editor2;
+    const pane=activePaneRef.current,session=pane==="left"?leftSession:rightSession,target=pane==="left"?editor:getRightEditor();
     if(!session.path)return;const source=sourceRef.current[pane]??await serializeNote(target,structuredClone(target.document));
     const name=session.path.split("/").pop()!;const path=await save({defaultPath:name+".zip",filters:[{name:"笔记及附件",extensions:["zip"]}]});
     if(!path)return;setStatus("正在打包笔记及附件…");
-    const {notePackage}=await import("./services/exportService");const bytes=await notePackage(source,name);
-    await writeFile(path,bytes);setStatus("导出成功");addToast("资料包已导出","success");
+    const plan=await portableMarkdown(source);if(plan.unresolved.length)throw new Error("有旧附件链接无法识别，请先检查附件链接。");
+    await transfer.run("导出笔记及附件包",async({id,signal,channel})=>{signal.throwIfAborted();await invoke("export_note_package",{destination:path,name,source:plan.source,assets:plan.assets,jobId:id,onProgress:channel});});setStatus("导出成功");addToast("资料包已导出","success");
   });
 
   // Markdown is the note's storage format. Word receives real OOXML blocks;
   // formulas are editable Office Math (OMML), never screenshots or $$ text.
   const handleExportWord = () => runNoteOperation("导出 Word 失败", async () => {
-    const pane=activePaneRef.current;await applySource(pane);
+    const pane=activePaneRef.current;await persistPane("left");await persistPane("right");
     const notePath = (pane==="left"?leftSession:rightSession).path;
     if (!notePath) return;
     setStatus("正在生成完整 Word 文档...");
-    const snapshot = structuredClone((pane==="left"?editor:editor2).document);
+    const snapshot = structuredClone((pane==="left"?editor:getRightEditor()).document);
     const { wordBytes } = await import("./services/exportService");
-    const { bytes, baseName } = await wordBytes(snapshot, notePath);
+    const { bytes, baseName } = await wordBytes(snapshot, notePath,wordLayout);
     const path = await save({
       defaultPath: `${baseName}.docx`,
       filters: [{ name: "Word Document", extensions: ["docx"] }],
@@ -751,14 +982,47 @@ function App() {
   
   // 🔥 目录点击跳转逻辑
   const jumpToBlock = (id: string) => {
-     const element = document.querySelector(`[data-editor-pane="${activePaneRef.current}"] [data-id="${id}"]`);
-     if (element) {
-         element.scrollIntoView({ behavior: "smooth", block: "center" });
-     }
+     window.dispatchEvent(new CustomEvent("no1:reveal-block",{detail:{pane:activePaneRef.current,id}}));
+     requestAnimationFrame(()=>{const element = document.querySelector(`[data-editor-pane="${activePaneRef.current}"] [data-id="${id}"]`);element?.scrollIntoView({ behavior: "smooth", block: "center" });});
+  };
+
+  const editableCommands=new Set<CommandId>(["reference","checklist","quote","footnote","math","code"]);
+  const commandEnabled=(id:CommandId)=>!isNoteBusy&&(!editableCommands.has(id)||!!activeFile&&!isReadMode&&sourceViews[activePane]===null)&&(!["word","pdf","source","properties","wordLayout"].includes(id)||!!activeFile);
+  const insertCommand=(id:CommandId)=>runNoteOperation("插入内容失败",async()=>{
+    if(!commandEnabled(id))return;
+    const saved=commandPosition.current;commandPosition.current=null;
+    if(saved)insertion.current=saved;else prepareInsertion();
+    const position=insertion.current!;const pane=position.pane,target=pane==="left"?editor:getRightEditor(),session=pane==="left"?leftSession:rightSession;
+    if(session.path!==position.path)throw new Error("笔记已切换，请重新选择位置。");
+    if(id==="reference"){await persistPane("left");await persistPane("right");const location=await sourcePositionForBlock(target,position.blockId);setReferenceDestination({path:session.path!,source:session.source,offset:location?.end??session.source.length});return;}
+    if(id==="footnote"){
+      const identifier="fn-"+crypto.randomUUID().slice(0,8);
+      target._tiptapEditor.commands.setTextSelection({from:position.from,to:position.to});
+      target.insertInlineContent([{type:"footnoteRef",props:{identifier}}]);
+      const b=target.insertBlocks([{type:"footnote",props:{identifier},content:"脚注内容"}],target.document[target.document.length-1].id,"after");target.setTextCursorPosition(b[0],"end");target.focus();
+    }else{
+      const block:any=id==="checklist"?{type:"checkListItem",content:"待办事项",props:{checked:false}}:id==="quote"?{type:"quote",content:"引用内容"}:id==="math"?{type:"latex",props:{text:encodeURIComponent("E=mc^2")}}:{type:"codeBlock",props:{text:encodeURIComponent(""),language:"text"}};
+      const b=target.insertBlocks([block],position.blockId,"after");if(id==="checklist"||id==="quote")target.setTextCursorPosition(b[0],"end");target.focus();
+    }
+  });
+  runCommandRef.current=(id)=>{
+    if(!commandEnabled(id))return;
+    if(id==="palette"){try{if(activeFile&&sourceViews[activePane]===null){prepareInsertion();commandPosition.current=insertion.current;}}catch{}setCommandDialog("palette");return;}
+    if(editableCommands.has(id)){void insertCommand(id);return;}
+    commandPosition.current=null;
+    switch(id){
+      case "save":void saveAllNotes();break;case "quick":setKnowledgeMode("search");break;case "capture":void showQuickCapture();break;case "daily":void openDaily();break;
+      case "search":setSearchOpen(true);break;case "find":setSearchTarget(null);setInlineSearchOpen(true);break;
+      case "sidebar":setIsSidebarOpen(true);setTimeout(()=>sidebarSearchRef.current?.focus(),100);break;
+      case "focus":setIsFocusMode(v=>!v);break;case "back":void navigateHistory(-1);break;case "forward":void navigateHistory(1);break;
+      case "tasks":setTasksOpen(true);break;case "word":void handleExportWord();break;case "pdf":void handleExportPdf();break;
+      case "wordLayout":setWordLayoutOpen(true);break;case "source":void toggleSource();break;case "templates":void handleTemplates();break;
+      case "properties":void handleProperties();break;case "settings":setCommandDialog("settings");break;
+    }
   };
 
   return (
-    <div className="app-shell" style={{ height: "100vh", display: "flex", position: "relative", "--reading-size":`${reading.fontSize}px`,"--reading-line":reading.lineHeight,"--reading-width":`${reading.width}px` } as React.CSSProperties}>
+    <div className="app-shell" data-right-editor={!!rightEditor.current} style={{ height: "100vh", display: "flex", position: "relative", "--reading-size":`${reading.fontSize}px`,"--reading-line":reading.lineHeight,"--reading-width":`${reading.width}px` } as React.CSSProperties}>
       <style>{`
         button[aria-label*="Download"], button[title*="Download"], [class*="bn-file-block"] [role="button"]:has(svg path[d*="M13 10"]), [class*="bn-image-block"] [role="button"]:has(svg path[d*="M13 10"]), [class*="bn-video-block"] [role="button"]:has(svg path[d*="M13 10"]) { display: none !important; }
         .bn-block-content .bn-block-content { background: transparent !important; padding: 0 !important; }
@@ -809,26 +1073,36 @@ function App() {
       `}</style>
       
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 0, backgroundImage: bgImage ? `url(${resolveAssetUrl(bgImage)})` : "none", backgroundSize: "cover", backgroundPosition: "center", backgroundColor: "#fff" }} className="no-print" />
+      <input ref={fileInput} type="file" multiple hidden aria-label="批量导入附件文件" onChange={e=>{const files=Array.from(e.target.files||[]);e.target.value="";if(files.length)void importAttachments(files);}}/>
       <CustomDialog {...dialogState} onConfirm={(val) => dialogState.resolve(val)} onCancel={() => dialogState.resolve(null)} bgImage={bgImage} bgOpacity={bgOpacity} bgBlur={bgBlur} onClearBg={clearBg} onSetBgImage={updateBgImage} onSetBgOpacity={(v) => { setBgOpacity(v); localStorage.setItem("app_bg_opacity", v.toString()); }} onSetBgBlur={(v) => { setBgBlur(v); localStorage.setItem("app_bg_blur", v.toString()); }} />
 
       {storageOpen && <Suspense fallback={<div role="status">正在加载容量管理…</div>}><StorageDialog scan={scanStorage} clean={cleanStorage} onClose={() => setStorageOpen(false)} /></Suspense>}
 
       <Suspense fallback={<div role="status" className="loading-panel">正在加载…</div>}>
-        {searchOpen&&<SearchPanel onClose={()=>setSearchOpen(false)} onOpen={openSearchHit} beforeSearch={beforeSearch} onReplace={replaceInNote}/>}
+        {knowledgeMode&&<KnowledgeHub key={knowledgeMode+":"+(initialCollection||"")} initialId={knowledgeMode==="collections"?initialCollection:null} onChanges={applyNoteChanges} mode={knowledgeMode} current={activeFile} recent={recent} collections={collections} onCollections={setCollections} beforeLoad={beforeSearch} onClose={()=>setKnowledgeMode(null)} onOpen={(path,line,query)=>openSearchHit({path,line,content:query},query)} onInsert={insertLink}/>}
+        {propertiesEdit&&<PropertiesDialog source={propertiesEdit.source} readOnly={isReadMode} onClose={()=>setPropertiesEdit(null)} onSave={content=>replaceInNote(propertiesEdit.path,propertiesEdit.source,content)}/>}
+        {templateCapture&&<TemplatesDialog capture={templateCapture} readOnly={isReadMode} onClose={()=>setTemplateCapture(null)} onCreate={createFromTemplate} onInsert={insertSnippet}/>}
+        {managerOpen&&<LibraryManagerDialog beforeAction={beforeSearch} onSwitch={switchLibrary} onClose={()=>setManagerOpen(false)}/>}
+        {attachmentsOpen&&<AttachmentManager beforeLoad={beforeSearch} onApply={applyNoteChanges} onOpen={(path,line)=>openSearchHit({path,line,content:""},"")} onClose={()=>setAttachmentsOpen(false)}/>}
+        {commandDialog&&<CommandDialog settings={commandDialog==="settings"} preferences={commands} onChange={setCommands} onRun={id=>runCommandRef.current(id)} enabled={commandEnabled} onClose={()=>setCommandDialog(null)}/>}
+        {tasksOpen&&<TasksDialog readOnly={isReadMode} beforeLoad={beforeSearch} onApply={applyNoteChanges} onOpen={(path,line)=>openSearchHit({path,line,content:""},"")} onClose={()=>setTasksOpen(false)}/>}
+        {wordLayoutOpen&&<WordLayoutDialog value={wordLayout} onChange={setWordLayout} onClose={()=>setWordLayoutOpen(false)} onExport={()=>void handleExportWord()}/>}
+        {referenceDestination&&<ReferencesDialog destination={referenceDestination} onApply={applyNoteChanges} onClose={()=>setReferenceDestination(null)}/>}
+        {searchOpen&&<SearchPanel onClose={()=>setSearchOpen(false)} onOpen={openSearchHit} beforeSearch={beforeSearch} onReplace={replaceInNote} onBatch={applyNoteChanges}/>}
         {history&&<HistoryDialog path={history.path} current={history.content} onClose={()=>setHistory(null)} onRestore={content=>perform("恢复版本失败",async()=>{await persistPane(history.pane);await applyText(history.pane,content);})}/>}
         {recoveryOpen&&<RecoveryDialog drafts={drafts} onClose={()=>setRecoveryOpen(false)} onRecover={recoverDraft} onDiscard={async draft=>{await invoke("clear_draft",{path:draft.path,draftId:draft.id});setDrafts(old=>old.filter(d=>d.path!==draft.path||d.id!==draft.id));}}/>}
         {conflict&&<ConflictDialog conflict={conflict} onClose={()=>setConflict(null)} onReload={()=>perform("载入磁盘版本失败",async()=>{
           await invoke("save_draft",{path:conflict.path,content:conflict.ours,baseSource:conflict.disk,draftId:crypto.randomUUID()});
-          const disk=await invoke<string>("load_note",{path:conflict.path});const target=conflict.pane==="left"?editor:editor2;
+          const disk=await invoke<string>("load_note",{path:conflict.path});const target=conflict.pane==="left"?editor:getRightEditor();
           installDocument(conflict.pane,conflict.path,disk,await parseNote(target,disk));setActivePane(conflict.pane);
           const remaining=await invoke<Draft[]>("list_drafts");setDrafts(remaining);
         })} onCopy={()=>perform("另存副本失败",async()=>{
           const path=conflict.path+"（副本 "+new Date().toISOString().replace(/[:.]/g,"-")+"）";
           await invoke("create_note",{path});await invoke("save_note",{path,content:conflict.ours,expectedContent:""});
-          const disk=await invoke<string>("load_note",{path:conflict.path});const target=conflict.pane==="left"?editor:editor2;
+          const disk=await invoke<string>("load_note",{path:conflict.path});const target=conflict.pane==="left"?editor:getRightEditor();
           installDocument(conflict.pane,conflict.path,disk,await parseNote(target,disk));await invoke("clear_draft",{path:conflict.path,draftId:draftIds.current[conflict.pane]});await refreshTree();addToast("已保留副本："+path,"success");
         })}/>}
-        {preferencesOpen&&<PreferencesDialog reading={reading} onReading={setReading} opacity={bgOpacity} blur={bgBlur} onOpacity={setBgOpacity} onBlur={setBgBlur} onImage={updateBgImage} onClear={clearBg} hasImage={!!bgImage} onLibrary={()=>setLibraryOpen(true)} onClose={()=>setPreferencesOpen(false)}/>}
+        {preferencesOpen&&<PreferencesDialog reading={reading} onReading={setReading} opacity={bgOpacity} blur={bgBlur} onOpacity={setBgOpacity} onBlur={setBgBlur} onImage={updateBgImage} onClear={clearBg} hasImage={!!bgImage} onLibrary={()=>setLibraryOpen(true)} onClose={()=>setPreferencesOpen(false)} theme={theme} onTheme={setTheme} autosaveSeconds={autosaveSeconds} onAutosave={setAutosaveSeconds} onManageLibrary={()=>setManagerOpen(true)}/>}
         {libraryOpen&&<LibraryDialog beforeScan={beforeSearch} onClose={()=>setLibraryOpen(false)} onApply={items=>perform("迁移附件链接失败",async()=>{
           await persistPane("left");await persistPane("right");
           for(const item of items){await invoke("save_note",{path:item.path,content:item.after,expectedContent:item.before});
@@ -853,6 +1127,10 @@ function App() {
           </div>
         </div>
         {/* Favorites section */}
+        <div className="sidebar-tools"><button onClick={()=>setKnowledgeMode("search")}>快速打开 {bindingFor("quick",commands)}</button><button onClick={()=>{setInitialCollection(null);setKnowledgeMode("collections");}}>智能集合</button><button onClick={()=>void handleTemplates()}>模板与片段</button><button onClick={()=>setManagerOpen(true)}>笔记库与备份</button></div>
+        <div className="sidebar-tools"><button title={"快速记录 ("+bindingFor("capture",commands)+"，全局 Ctrl+Alt+N)"} onClick={()=>void showQuickCapture()}>快速记录</button><button title={"今日笔记 ("+bindingFor("daily",commands)+")"} onClick={()=>void openDaily()}>今日笔记</button></div>
+        {collections.some(c=>c.pinned)&&<div className="pinned-collections">{collections.filter(c=>c.pinned).map(c=><button key={c.id} title={c.name} onClick={()=>{setInitialCollection(c.id);setKnowledgeMode("collections");}}>▤ {c.name}</button>)}</div>}
+        <div className="library-location" title={libraryRoot} onClick={()=>setManagerOpen(true)}>{libraryRoot||"正在打开笔记库…"}</div>
         {[...favPaths].length > 0 && (
           <div style={{ padding: "4px 8px", borderBottom: "1px solid rgba(0,0,0,0.05)", background: "#fefce8" }}>
             <div style={{ fontSize: "10px", color: "#b45309", fontWeight: 600, marginBottom: "2px", paddingLeft: "4px" }}>⭐ 收藏</div>
@@ -868,7 +1146,7 @@ function App() {
             ))}
           </div>
         )}
-        <div style={{ padding: "0 10px 10px 10px", borderBottom: "1px solid rgba(0,0,0,0.05)" }}><input ref={sidebarSearchRef} type="text" placeholder="🔍 搜索... (Ctrl+K)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+        <div style={{ padding: "0 10px 10px 10px", borderBottom: "1px solid rgba(0,0,0,0.05)" }}><input ref={sidebarSearchRef} type="text" placeholder={"🔍 搜索... ("+bindingFor("sidebar",commands)+")"} value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     const collectFiles = (ns: FileNode[]): string[] => {
@@ -891,6 +1169,7 @@ function App() {
           onMouseEnter={(e) => e.currentTarget.style.background = "#f5f5f5"}
           onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
           onClick={handleOpenTrash}><Icon name="trash"/><span>回收站</span></div>
+        <button className="sidebar-attachments" onClick={()=>setAttachmentsOpen(true)}>附件管理</button>
         <button onClick={handleOpenStorage} style={{ padding: "10px 16px", border: 0, background: "transparent", textAlign: "left", color: "#666", cursor: "pointer" }}><Icon name="storage"/> 容量管理</button>
         <div style={{ padding: "8px 12px", borderTop: "1px solid #e8eaed", background: "#fafbfc" }}>
           <div style={{ display: "flex", gap: "6px" }}>
@@ -957,20 +1236,26 @@ function App() {
           </div>
         )}
 
-        {!isFocusMode&&<Toolbar hasFile={!!activeFile} busy={isNoteBusy} dirty={activePane==="right"?rightDirty:!!tabs[activeTabIndex]?.isDirty}
+        {!isFocusMode&&<Toolbar commands={commands} runCommand={id=>runCommandRef.current(id)} commandEnabled={commandEnabled} hasFile={!!activeFile} busy={isNoteBusy} dirty={activePane==="right"?rightDirty:!!tabs[activeTabIndex]?.isDirty}
           readMode={isReadMode} splitMode={isSplitMode} sidebarOpen={isSidebarOpen} tocOpen={isTocOpen} sourceMode={sourceViews[activePane]!==null}
           wordCount={wordCount} saveTime={lastSaveTime} draftTime={draftTimes[activePane]} status={status} drafts={drafts.length}
           sidebar={()=>setIsSidebarOpen(v=>!v)} toc={()=>setIsTocOpen(v=>!v)} search={()=>setSearchOpen(true)}
-          undo={()=>(activePane==="left"?editor:editor2).undo()} redo={()=>(activePane==="left"?editor:editor2).redo()}
+          undo={()=>(activePane==="left"?editor:getRightEditor()).undo()} redo={()=>(activePane==="left"?editor:getRightEditor()).redo()}
           read={()=>setIsReadMode(v=>!v)} split={()=>void toggleSplitMode()} focus={()=>setIsFocusMode(v=>!v)} save={()=>void saveAllNotes()}
           word={()=>void handleExportWord()} pdf={()=>void handleExportPdf()} source={()=>void toggleSource()} history={()=>void handleHistory()}
           pack={()=>void handleExportPackage()} links={()=>setLibraryOpen(true)} settings={handleOpenSettings}
+          quick={()=>setKnowledgeMode("search")} properties={()=>void handleProperties()} relations={()=>setKnowledgeMode("relations")} collections={()=>setKnowledgeMode("collections")} templates={()=>void handleTemplates()} insertLink={handleInsertLink}
+          importFiles={chooseAttachments} attachments={()=>setAttachmentsOpen(true)}
+          back={()=>void navigateHistory(-1)} forward={()=>void navigateHistory(1)} canBack={navigation.at>0} canForward={navigation.at<navigation.paths.length-1}
           recovery={()=>void runNoteOperation("载入草稿失败",async()=>{const all=await invoke<Draft[]>("list_drafts");setDrafts(all);setRecoveryOpen(true);})}/>}
+        {external&&<div className="external-change no-print" role="status"><span>{external.path}：{external.disk===null?"原文件已被移动或删除，窗口中的内容仍保留。":"磁盘内容已被外部修改，你的编辑仍保留。"}</span>
+          {external.disk!==null?<button onClick={()=>void runNoteOperation("比较失败",async()=>{const pane=external.pane,target=pane==="left"?editor:getRightEditor();const ours=sourceRef.current[pane]??await serializeNote(target,structuredClone(target.document));setConflict({pane,path:external.path,ours,disk:external.disk!});})}>比较并处理</button>:<button onClick={()=>void runNoteOperation("另存副本失败",async()=>{const pane=external.pane,target=pane==="left"?editor:getRightEditor();const content=sourceRef.current[pane]??await serializeNote(target,structuredClone(target.document));const path=external.path+"（保留 "+new Date().toISOString().replace(/[:.]/g,"-")+"）";await invoke("create_note",{path});await invoke("save_note",{path,content,expectedContent:""});installDocument(pane,path,content,await parseNote(target,content));setExternal(null);await refreshTree();})}>另存为新笔记</button>}
+        </div>}
 
         {/* 纯净模式顶栏 */}
         {isFocusMode && (
           <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 16px", background: "rgba(255,255,255,0.95)", borderBottom: "1px solid #eee", backdropFilter: "blur(8px)", flexShrink: 0 }}>
-            <span style={{ fontSize: "12px", color: "#999" }}>纯净模式 · Ctrl+Shift+D 退出</span>
+            <span style={{ fontSize: "12px", color: "#999" }}>纯净模式 · {bindingFor("focus",commands)||"点击退出按钮"} 退出</span>
             <button onClick={() => setIsFocusMode(false)}
               style={{ padding: "4px 12px", background: "#f0f0f0", border: "1px solid #e0e0e0", borderRadius: "6px", cursor: "pointer", fontSize: "12px", color: "#666" }}
               onMouseEnter={(e) => { e.currentTarget.style.background = "#e0e0e0"; }}
@@ -1037,10 +1322,10 @@ function App() {
                 padding: isSplitMode ? "16px 24px" : "40px 60px",
                 paddingBottom: isSplitMode ? "30vh" : "50vh",
                 transition: "padding 0.3s ease"
-              }} className={"note-body "+(activePane==="left"?"active-pane":"")} data-editor-pane="left" onFocusCapture={()=>setActivePane("left")} onPointerDownCapture={()=>setActivePane("left")} onScroll={e=>rememberScroll("left",e.currentTarget)} inert={isNoteBusy||!workspaceReady} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) void saveCurrentNote(); }}>
+              }} className={"note-body "+(activePane==="left"?"active-pane":"")} data-editor-pane="left" data-note-path={currentFile||""} onFocusCapture={()=>setActivePane("left")} onPointerDownCapture={()=>setActivePane("left")} onScroll={e=>rememberScroll("left",e.currentTarget)} inert={isNoteBusy||!workspaceReady} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) void saveCurrentNote(); }}>
               {inlineSearchOpen&&activePane==="left"&&<InlineSearch key="left" index={textIndex} revision={documentRevision} source={sourceViews.left} onJump={(id,query)=>jumpToMatch("left",id,query)} onClose={()=>{setInlineSearchOpen(false);clearSearchHighlight();}}/>}
               {currentFile ? (
-                 <NoteEditor key={currentFile} editor={editor} onChange={onEditorChange} readOnly={isReadMode} busy={isNoteBusy} showDialog={showDialog}
+                 <NoteEditor key={currentFile} theme={resolvedTheme} pane="left" revision={documentRevision} onFiles={(files,id)=>dropAttachments("left",files,id)} editor={editor} onChange={onEditorChange} readOnly={isReadMode} busy={isNoteBusy} showDialog={showDialog}
                    source={printing?null:sourceViews.left} onSourceChange={text => changeSource("left", text)} />
               ) : (<div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#999" }}>选择或新建一个笔记</div>)}
             </div>
@@ -1076,10 +1361,10 @@ function App() {
                   flex: 1, overflow: "auto",
                   padding: "16px 24px",
                   paddingBottom: "30vh"
-                }} className={"note-body "+(activePane==="right"?"active-pane":"")} data-editor-pane="right" onFocusCapture={()=>setActivePane("right")} onPointerDownCapture={()=>setActivePane("right")} onScroll={e=>rememberScroll("right",e.currentTarget)} inert={isNoteBusy||!workspaceReady} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) void saveRightNote(); }}>
+                }} className={"note-body "+(activePane==="right"?"active-pane":"")} data-editor-pane="right" data-note-path={rightFile||""} onFocusCapture={()=>setActivePane("right")} onPointerDownCapture={()=>setActivePane("right")} onScroll={e=>rememberScroll("right",e.currentTarget)} inert={isNoteBusy||!workspaceReady} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) void saveRightNote(); }}>
                 {inlineSearchOpen&&activePane==="right"&&<InlineSearch key="right" index={rightTextIndex} revision={documentRevision} source={sourceViews.right} onJump={(id,query)=>jumpToMatch("right",id,query)} onClose={()=>{setInlineSearchOpen(false);clearSearchHighlight();}}/>}
                 {rightFile ? (
-                  <NoteEditor key={'r'+rightFile} editor={editor2} onChange={onRightEditorChange} readOnly={isReadMode} busy={isNoteBusy} showDialog={showDialog}
+                  <NoteEditor key={'r'+rightFile} theme={resolvedTheme} pane="right" revision={documentRevision} onFiles={(files,id)=>dropAttachments("right",files,id)} editor={getRightEditor()} onChange={onRightEditorChange} readOnly={isReadMode} busy={isNoteBusy} showDialog={showDialog}
                     source={printing?null:sourceViews.right} onSourceChange={text => changeSource("right", text)} />
                 ) : (
                   <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#999", gap: "12px" }}>
@@ -1138,18 +1423,10 @@ function App() {
       {/* Shortcut panel (?) */}
       {shortcutPanel && (
         <div className="no-print" style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.4)", backdropFilter: "blur(2px)", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 2147483647 }} onClick={() => setShortcutPanel(false)}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: "480px", borderRadius: "14px", boxShadow: "0 24px 48px rgba(0,0,0,0.18)", padding: "28px 32px" }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "white", width: "480px", maxHeight:"85vh",overflow:"auto", borderRadius: "14px", boxShadow: "0 24px 48px rgba(0,0,0,0.18)", padding: "28px 32px" }}>
             <h3 style={{ margin: "0 0 20px 0", fontSize: "16px" }}>⌨️ 快捷键</h3>
-            {[
-              ["Ctrl+S", "保存两栏笔记"],
-              ["Ctrl+K", "聚焦侧边栏搜索"],
-              ["Ctrl+F", "笔记内搜索定位"],
-              ["Ctrl+Shift+F", "全局搜索替换"],
-              ["Ctrl+Shift+D", "纯净模式"],
-              ["Ctrl+Z / Ctrl+Shift+Z", "撤销 / 重做"],
-              ["Esc", "关闭当前面板 / 弹窗"],
-              ["?", "显示此快捷键面板"],
-            ].map(([key, desc]) => (
+            <button onClick={()=>{setShortcutPanel(false);setCommandDialog("settings");}}>自定义快捷键与工具栏</button>
+            {[...commandDefinitions.filter(([id])=>bindingFor(id,commands)).map(([id,label])=>[bindingFor(id,commands),label]),["Ctrl+Z / Ctrl+Shift+Z","撤销 / 重做"],["Esc","关闭当前面板"]            ].map(([key, desc]) => (
               <div key={key} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #f5f5f5", fontSize: "13px" }}>
                 <span style={{ fontFamily: "monospace", fontWeight: 600, color: "#1890ff", fontSize: "12px" }}>{key}</span>
                 <span style={{ color: "#666" }}>{desc}</span>
@@ -1158,6 +1435,7 @@ function App() {
           </div>
         </div>
       )}
+      {transfer.state&&<TransferPanel state={transfer.state} onCancel={transfer.cancel}/>}
     </div>
   );
 }

@@ -8,9 +8,13 @@ import { LatexBlock } from "./LatexBlock";
 import { CalloutBlock } from "./CalloutBlock";
 import { RawMarkdownBlock } from "./RawMarkdownBlock";
 import { LegacyMathBlock } from "./LegacyMathBlock";
+import { NoteLink } from "./NoteLink";
+import { NotePropertiesBlock } from "./NotePropertiesBlock";
+import {FootnoteBlock,FootnoteRef} from "./Footnote";
+import {NoteAnchor,NoteReference} from "./NoteReference";
 
 export const schema = BlockNoteSchema.create({
-    inlineContentSpecs: { ...defaultInlineContentSpecs, inlineMath: InlineMath },
+    inlineContentSpecs: { ...defaultInlineContentSpecs, inlineMath: InlineMath, noteLink: NoteLink,footnoteRef:FootnoteRef },
     blockSpecs: {
         ...defaultBlockSpecs,
         image: ImageBlock(),
@@ -21,5 +25,7 @@ export const schema = BlockNoteSchema.create({
         callout: CalloutBlock(),
         rawMarkdown: RawMarkdownBlock(),
         legacyMath: LegacyMathBlock(),
+        noteProperties: NotePropertiesBlock(),
+        footnote:FootnoteBlock(),noteAnchor:NoteAnchor(),noteReference:NoteReference(),
     }
 });

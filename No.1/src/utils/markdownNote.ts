@@ -3,8 +3,10 @@ import { mathSpans, maskBracketDisplay, protectInlineMath, restoreInlineMath, se
 import type { MathSpan } from "./mathSyntax.ts";
 import { legacyMathParts } from "./legacyMath.ts";
 import { resolveBlockAssets, storedAssetUrl } from "./assetLinks.ts";
+import { protectWiki, restoreWiki, type WikiLink } from "./wikiLinks.ts";
 
 interface MarkdownEditor {
+  schema?: any;
   blocksToMarkdownLossy: (blocks: any[]) => string | Promise<string>;
   tryParseMarkdownToBlocks: (content: string) => any[] | Promise<any[]>;
 }
@@ -24,7 +26,7 @@ const decode = (text = "") => { try { return decodeURIComponent(text); } catch {
 const rawBlock = (source: string) => ({
   id: crypto.randomUUID(), type: "rawMarkdown", props: { source: encodeURIComponent(source) },
 });
-const inlineTypes = new Set(["text", "emphasis", "strong", "delete", "link", "inlineCode", "inlineMath", "break"]);
+const inlineTypes = new Set(["text", "emphasis", "strong", "delete", "link", "inlineCode", "inlineMath", "break", "footnoteReference"]);
 function supportedInline(node: any): boolean {
   return inlineTypes.has(node.type) && (!node.children || node.children.every(supportedInline));
 }
@@ -36,13 +38,15 @@ function isVisual(node: any): boolean {
   // Its indexing plugin treats 0 as 1, so retain zero-based lists as source.
   if (node.type === "list" && (!node.ordered || node.start >= 1)) {
     return node.children.every((item: any) =>
-      item.children.length === 1 && item.children[0].type === "paragraph" && isVisual(item.children[0]));
+      item.children[0]?.type === "paragraph" && item.children.every(isVisual));
   }
+  if(node.type === "blockquote")return node.children.every(isVisual);
   return node.type === "thematicBreak";
 }
 function customBlock(node: any, raw: string): any | undefined {
   const id = crypto.randomUUID();
   const value = typeof node.value === "string" ? node.value.replace(/\r\n?/g, "\n") : "";
+  if (node.type === "yaml") return {id, type: "noteProperties", props: {source: encodeURIComponent(raw)}};
   if (node.type === "code" && !node.meta) {
     const info = /^(.*?)(?:\|w=(\d+|100%)\|h=(\d+))?$/.exec(node.lang || "text")!;
     const [, language, width, height] = info;
@@ -96,6 +100,40 @@ export async function parseNote(editor: MarkdownEditor, source: string): Promise
   const markerPrefix = "BNBOUNDARY" + crypto.randomUUID().replace(/-/g, "");
   const markers = new Map<string, number>();
   const mathTokens = new Map<string, MathSpan>();
+  const wikiTokens = new Map<string, WikiLink>();
+  const footnoteTokens=new Map<string,string>();
+  const footnoteDefinitions=nodes.filter(n=>n.type==="footnoteDefinition").map(n=>"[^"+n.identifier+"]: placeholder").join("\n\n");
+  const footnotesSupported=!!editor.schema?.inlineContentSchema?.footnoteRef;
+  const restoreFootnotes=(value:any):any=>{
+    if(Array.isArray(value))return value.flatMap(restoreFootnotes);
+    if(!value||typeof value!=="object")return value;
+    if(value.type==="text"&&typeof value.text==="string")return value.text.split(/(BNFOOT[a-f0-9]{32})/).filter(Boolean).map((text:string)=>footnoteTokens.has(text)?{type:"footnoteRef",props:{identifier:footnoteTokens.get(text)}}:{...value,text});
+    return Object.fromEntries(Object.entries(value).map(([key,v])=>[key,restoreFootnotes(v)]));
+  };
+  const protect = (raw: string, node: any, offset: number) => {
+    let maths = protectInlineMath(raw, mathTokens, excludedInlineMathRanges(node, offset));
+    if(footnotesSupported&&maths.includes("[^")){
+      const edits:{start:number;end:number;token:string}[]=[];
+      const visit=(n:any)=>{if(n.type==="footnoteReference"&&n.position.end.offset<=maths.length){const token="BNFOOT"+crypto.randomUUID().replace(/-/g,"");footnoteTokens.set(token,n.identifier);edits.push({start:n.position.start.offset,end:n.position.end.offset,token});}n.children?.forEach(visit);};visit(parser.parse(maths+"\n\n"+footnoteDefinitions));
+      for(const e of edits.sort((a,b)=>b.start-a.start))maths=maths.slice(0,e.start)+e.token+maths.slice(e.end);
+    }
+    if (!maths.includes("[[")) return maths;
+    const reparsed = parser.parse(maths);
+    const excluded = reparsed.children.flatMap((n: any) => excludedInlineMathRanges(n, 0));
+    return protectWiki(maths, wikiTokens, excluded);
+  };
+  const restore = (block: any) => restoreFootnotes(restoreWiki(restoreInlineMath(block, mathTokens), wikiTokens));
+  const structured=async(nodes:any[],src:string):Promise<any[]>=>{
+    const out:any[]=[];
+    for(const n of nodes){const raw=src.slice(n.position.start.offset,n.position.end.offset);
+      if(n.type==="list"){
+        for(const [i,item] of n.children.entries()){const first=(await structured([item.children[0]],src))[0];out.push({id:crypto.randomUUID(),type:typeof item.checked==="boolean"?"checkListItem":n.ordered?"numberedListItem":"bulletListItem",props:typeof item.checked==="boolean"?{checked:item.checked}:n.ordered?{start:(n.start||1)+i}:{},content:first?.content||[],children:await structured(item.children.slice(1),src)});}
+      }else if(n.type==="blockquote"||n.type==="footnoteDefinition"){
+        const first=n.children[0]?.type==="paragraph"?(await structured([n.children[0]],src))[0]:null;
+        out.push({id:crypto.randomUUID(),type:n.type==="blockquote"?"quote":"footnote",props:n.type==="footnoteDefinition"?{identifier:n.identifier}:{},content:first?.content||[],children:await structured(n.children.slice(first?1:0),src)});
+      }else{const custom=customBlock(n,raw);if(custom)out.push(custom);else out.push(...(await editor.tryParseMarkdownToBlocks(protect(raw,n,n.position.start.offset))).map(restore));}
+    }return out;
+  };
   const groups: any[][] = nodes.map(() => []);
   const rawSlices: string[] = [];
   let tagged = "";
@@ -107,15 +145,20 @@ export async function parseNote(editor: MarkdownEditor, source: string): Promise
     rawSlices.push(source.slice(cursor, end));
     cursor = end;
     let custom = customBlock(node, raw);
+    const anchor=/^<!--\s*no1:anchor:([a-zA-Z0-9_-]+)\s*-->$/.exec(raw);
+    const reference=/^!\[\[([^\]\r\n|]+)(?:\|([^\]\r\n]*))?\]\]$/.exec(raw);
+    if(anchor)custom={id:crypto.randomUUID(),type:"noteAnchor",props:{identifier:anchor[1]}};
+    if(reference)custom={id:crypto.randomUUID(),type:"noteReference",props:{target:reference[1],label:reference[2]||""}};
+    if(!footnotesSupported&&raw.includes("[^"))custom=rawBlock(raw);
     const alert = node.type === "blockquote" && /^>\s*\[!(INFO|NOTE|WARNING|CAUTION|ERROR|TIP|IMPORTANT)\](?:[ \t]+([^\r\n]*))?(?:\r?\n|$)/i.exec(raw);
     if (alert) {
+      custom=rawBlock(raw);
       const body = raw.slice(alert[0].length).split(/\r?\n/).map((line: string) => line.replace(/^>[ \t]?/, "")).join("\n");
       const bodyAst = parser.parse(body);
       // Inline callouts cannot represent nested blocks; retain complex alerts verbatim.
       if (bodyAst.children.length <= 1 && (!bodyAst.children.length || (bodyAst.children[0].type === "paragraph" && isVisual(bodyAst.children[0])))) {
-        const tokens = new Map<string, MathSpan>();
-        const parsed = body ? await editor.tryParseMarkdownToBlocks(protectInlineMath(body, tokens)) : [];
-        const first = parsed[0] ? restoreInlineMath(parsed[0], tokens) : null;
+        const parsed = body ? await editor.tryParseMarkdownToBlocks(protect(body, bodyAst, 0)) : [];
+        const first = parsed[0] ? restore(parsed[0]) : null;
         const type = alert[1].toLowerCase();
         custom = { id: crypto.randomUUID(), type: "callout", props: {
           calloutType: ["warning", "caution"].includes(type) ? "warning" : type === "error" ? "error" : ["tip", "important"].includes(type) ? "tip" : "info",
@@ -123,11 +166,12 @@ export async function parseNote(editor: MarkdownEditor, source: string): Promise
         }, content: first?.content || [] };
       }
     }
-    if (custom) groups[index] = [custom];
+    if((node.type==="list"&&isVisual(node))||(node.type==="blockquote"&&!alert&&isVisual(node))||(node.type==="footnoteDefinition"&&footnotesSupported))groups[index]=await structured(parser.parse(raw).children,raw);
+    else if (custom) groups[index] = [custom];
     else {
       const marker = markerPrefix + index;
       markers.set(marker, index);
-      tagged += marker + "\n\n" + protectInlineMath(raw, mathTokens, excludedInlineMathRanges(node, start - bomOffset)) + "\n\n";
+      tagged += marker + "\n\n" + protect(raw, node, start) + "\n\n";
     }
   }
   if (tagged) {
@@ -139,7 +183,7 @@ export async function parseNote(editor: MarkdownEditor, source: string): Promise
       const marker = block.type === "paragraph" && Array.isArray(block.content) && block.content.length === 1
         ? block.content[0].text : null;
       if (markers.has(marker)) groupIndex = markers.get(marker)!;
-      else if (groupIndex >= 0) groups[groupIndex].push(restoreInlineMath(block, mathTokens));
+      else if (groupIndex >= 0) groups[groupIndex].push(restore(block));
     }
   }
   groups.forEach((blocks, index) => {
@@ -182,7 +226,7 @@ const fenceFor = (text: string) => {
   const runs = text.match(new RegExp(ticks + "+", "g")) || [];
   return ticks.repeat(Math.max(3, ...runs.map(run => run.length + 1)));
 };
-const customTypes = new Set(["rawMarkdown", "legacyMath", "latex", "mermaid", "file", "image", "codeBlock", "callout"]);
+const customTypes = new Set(["rawMarkdown", "legacyMath", "latex", "mermaid", "file", "image", "codeBlock", "callout", "noteProperties", "footnote", "noteAnchor", "noteReference", "quote"]);
 const containsCustom = (blocks: any[]): boolean => blocks.some(block => customTypes.has(block.type) || containsCustom(block.children || []));
 async function serializeFresh(editor: MarkdownEditor, blocks: any[]): Promise<string> {
   let result = "";
@@ -194,7 +238,19 @@ async function serializeFresh(editor: MarkdownEditor, blocks: any[]): Promise<st
   for (const block of blocks) {
     const props = block.props || {};
     let text: string | undefined;
-    if (block.type === "rawMarkdown" || block.type === "legacyMath") text = decode(props.source);
+    if (block.type === "rawMarkdown" || block.type === "legacyMath" || block.type === "noteProperties") text = decode(props.source);
+    if(block.type==="noteAnchor")text="<!-- no1:anchor:"+String(props.identifier).replace(/[^a-zA-Z0-9_-]/g,"")+" -->";
+    if(block.type==="noteReference")text="![["+String(props.target).replace(/[\[\]\r\n|]/g,"")+(props.label?"|"+String(props.label).replace(/[\[\]\r\n]/g,""):"")+"]]";
+    if(block.type==="quote"||block.type==="footnote"){
+      const own=await serializeWithInlineMath([{...block,type:"paragraph",children:[]}],blocks=>editor.blocksToMarkdownLossy(encodeSpacesInBlocks(blocks)));
+      const body=own.trimEnd()+(block.children?.length?"\n\n"+await serializeFresh(editor,block.children):"");
+      text=block.type==="quote"?body.split(/\r?\n/).map(line=>"> "+line).join("\n"):"[^"+props.identifier+"]: "+body.split(/\r?\n/).map((line,i)=>i?"    "+line:line).join("\n");
+    }
+    if(["bulletListItem","numberedListItem","checkListItem"].includes(block.type)&&block.children?.length){
+      const own=await serializeWithInlineMath([{...block,type:"paragraph",children:[]}],blocks=>editor.blocksToMarkdownLossy(encodeSpacesInBlocks(blocks)));
+      const marker=block.type==="numberedListItem"?(props.start||1)+". ":block.type==="checkListItem"?"- ["+(props.checked?"x":" ")+"] ":"- ";
+      text=marker+own.trimEnd()+"\n\n"+(await serializeFresh(editor,block.children)).split(/\r?\n/).map(line=>"    "+line).join("\n");
+    }
     if (block.type === "latex") text = "$$\n" + decode(props.text) + "\n$$";
     if (block.type === "codeBlock" || block.type === "mermaid") {
       const code = block.type === "mermaid" ? props.code || "" : decode(props.text);
@@ -212,7 +268,7 @@ async function serializeFresh(editor: MarkdownEditor, blocks: any[]): Promise<st
     }
     if (text !== undefined) {
       await flush();
-      if (block.children?.length) text += "\n\n" + (await serializeFresh(editor, block.children)).split("\n").map(line => "    " + line).join("\n");
+      if (block.children?.length&&!(["quote","footnote","bulletListItem","numberedListItem","checkListItem"].includes(block.type))) text += "\n\n" + (await serializeFresh(editor, block.children)).split("\n").map(line => "    " + line).join("\n");
       append(text);
     } else {
       // Do not silently discard unsupported custom descendants.
@@ -256,4 +312,13 @@ export async function serializeNote(editor: MarkdownEditor, currentBlocks: any[]
   }
   await flush();
   return source.prefix + result + source.tail;
+}
+
+export async function sourcePositionForBlock(editor:MarkdownEditor & {document?:any[]},id:string){
+  const source=installedSources.get(editor),blocks=editor.document;if(!source||!blocks)return null;
+  const contains=(block:any):boolean=>block.id===id||(block.children||[]).some(contains);
+  let index=blocks.findIndex(contains);if(index<0)return null;
+  const group=source.groups.find(g=>g.ids.includes(blocks[index].id));
+  if(group){const last=blocks.findIndex(b=>b.id===group.ids[group.ids.length-1]);index=Math.max(index,last);}
+  const serialized=await serializeNote(editor,blocks.slice(0,index+1));return {end:serialized.length-source.tail.length};
 }

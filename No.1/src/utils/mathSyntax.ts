@@ -137,6 +137,16 @@ export async function serializeWithInlineMath(blocks: any[], convert: (blocks: a
   const visit = (value: any): any => {
     if (Array.isArray(value)) return value.map(visit);
     if (!value || typeof value !== "object") return value;
+    if(value.type==="footnoteRef"){
+      const marker="BNFOOT"+crypto.randomUUID().replace(/-/g,"");replacements.set(marker,"[^"+String(value.props.identifier).replace(/[\]\r\n]/g,"")+"]");return {type:"text",text:marker,styles:{}};
+    }
+    if (value.type === "noteLink") {
+      const marker = "BNWIKI" + crypto.randomUUID().replace(/-/g, "");
+      const target = String(value.props.target || "").replace(/[\r\n\[\]]/g, "");
+      const label = String(value.props.label || target).replace(/[\r\n\[\]]/g, "");
+      replacements.set(marker, "[[" + target + (label !== target ? "|" + label : "") + "]]");
+      return {type: "text", text: marker, styles: {}};
+    }
     if (value.type === "inlineMath") {
       const marker = "BNMATH" + crypto.randomUUID().replace(/-/g, "");
       const tex = decodeMath(value.props.text);

@@ -12,6 +12,14 @@ const text = value => [{ type: "text", text: value, styles: {} }];
 const formula = value => ({ type: "inlineMath", props: { text: encodeURIComponent(value), display: false } });
 const noImage = async () => assert.fail("unexpected image request");
 
+test("Word research template creates A4 styles, heading numbering, captions, fields and visual footnotes",async()=>{
+  const {wordPresets}=await import("../src/utils/wordLayout.ts");
+  const blocks=[{type:"heading",props:{level:1},content:text("报告标题")},{type:"heading",props:{level:2},content:text("研究方法")},{type:"paragraph",content:[...text("有脚注"),{type:"footnoteRef",props:{identifier:"a"}}]},{type:"footnote",props:{identifier:"a"},content:text("脚注正文"),children:[]},{type:"latex",props:{text:encodeURIComponent("x=1")}},{type:"image",props:{url:"fixture",name:"实验装置"}},{type:"noteAnchor",props:{identifier:"ref-123"}}];
+  const bytes=await exportWord(blocks,{title:"模板验收",layout:wordPresets["学术报告"],image:async()=>({data:Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jP1sAAAAASUVORK5CYII=","base64")),type:"png",width:1,height:1}),diagram:noImage});
+  const zip=await JSZip.loadAsync(bytes),xml=await zip.file("word/document.xml").async("string"),styles=await zip.file("word/styles.xml").async("string"),footnotes=await zip.file("word/footnotes.xml").async("string");
+  assert.match(xml,/w:w="11906"/);assert.match(xml,/w:h="16838"/);assert.match(styles,/Times New Roman/);assert.match(styles,/w:line="360"/);assert.match(styles,/w:sz w:val="24"/);assert.match(xml,/SEQ Figure/);assert.match(xml,/SEQ Equation/);assert.match(xml,/实验装置/);assert.match(xml,/w:numPr/);assert.match(footnotes,/脚注正文/);assert.ok(!xml.includes("ref-123"));assert.match(await zip.file("word/header1.xml").async("string"),/模板验收/);assert.match(await zip.file("word/footer1.xml").async("string"),/PAGE/);
+});
+
 test("Word export uses native Office equations and structural Word content", async () => {
   const blocks = [
     { type: "heading", props: { level: 1 }, content: text("测试标题"), children: [] },

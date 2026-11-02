@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::{fs, path::Path};
+use std::path::Path;
 
 #[derive(Serialize)]
 pub struct Match {
@@ -26,71 +26,31 @@ pub fn search(root: &Path, query: &str, offset: usize, limit: usize) -> Result<P
         return Ok(page);
     }
     let query = query.to_lowercase();
+    let snapshot = crate::catalog::snapshot(root, false)?;
+    page.warnings = snapshot.warnings;
     let mut seen = 0;
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        query: &str,
-        offset: usize,
-        limit: usize,
-        seen: &mut usize,
-        page: &mut Page,
-    ) -> Result<(), String> {
-        let mut entries = fs::read_dir(dir)
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            if page.has_more {
-                break;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let kind = entry.file_type().map_err(|e| e.to_string())?;
-            if name.starts_with('.') || name == "assets" || kind.is_symlink() {
+    for note in snapshot.notes {
+        for (line, (text, lower)) in note.source.lines().zip(note.lower.lines()).enumerate() {
+            if !lower.contains(&query) {
                 continue;
             }
-            let path = entry.path();
-            if kind.is_dir() {
-                walk(root, &path, query, offset, limit, seen, page)?;
-            } else if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-            {
-                let content = match fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        page.warnings.push(format!("{}: {e}", name));
-                        continue;
-                    }
-                };
-                for (line, text) in content.lines().enumerate() {
-                    if !text.to_lowercase().contains(query) {
-                        continue;
-                    }
-                    if *seen >= offset {
-                        if page.matches.len() == limit {
-                            page.has_more = true;
-                            break;
-                        }
-                        page.matches.push(Match {
-                            path: path
-                                .strip_prefix(root)
-                                .map_err(|e| e.to_string())?
-                                .with_extension("")
-                                .to_string_lossy()
-                                .replace('\\', "/"),
-                            line: line + 1,
-                            content: text.to_owned(),
-                        });
-                    }
-                    *seen += 1;
+            if seen >= offset {
+                if page.matches.len() == limit {
+                    page.has_more = true;
+                    break;
                 }
+                page.matches.push(Match {
+                    path: note.path.clone(),
+                    line: line + 1,
+                    content: text.to_owned(),
+                });
             }
+            seen += 1;
         }
-        Ok(())
+        if page.has_more {
+            break;
+        }
     }
-    walk(root, root, &query, offset, limit, &mut seen, &mut page)?;
     Ok(page)
 }
 #[tauri::command]
@@ -103,6 +63,7 @@ pub async fn search_notes_page(query: String, offset: Option<usize>) -> Result<P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     #[test]
     fn paging_is_stable_and_does_not_claim_a_truncated_total() {
         let root = tempfile::tempdir().unwrap();
